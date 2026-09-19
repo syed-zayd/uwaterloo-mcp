@@ -41,16 +41,20 @@ import {
   type DiscussionPost,
 } from "./d2l/discussions.js";
 import {
+  getCourseFile,
+  getCourseFileMetadata,
   getSubmissionFile,
   getSubmissionFileMetadata,
   getTopicFile,
   getTopicFileMetadata,
 } from "./d2l/files.js";
+import { resolveCourseFilePath } from "./d2l/coursePaths.js";
 import { getSubmissionHistory, resolveDropboxFolder } from "./d2l/submissions.js";
 import { getAssignmentFeedback, type AssignmentFeedback } from "./d2l/feedback.js";
 import { getRubricsForGradeItem, type GradedRubric } from "./d2l/rubrics.js";
 import {
   FILE_URL_TTL_SECONDS,
+  signCourseFilePathToken,
   signFileToken,
   signSubmissionFileToken,
 } from "./fileUrls.js";
@@ -119,6 +123,41 @@ const courseArg = z
   .string()
   .describe("Course id, name, or code — e.g. 1261658, \"CS 247\". Ids come from list_courses.");
 
+/**
+ * Two ways to name the same thing, because a course holds both.
+ *
+ * Most files are content topics and have an id. Some are not: a template, a policy PDF or a
+ * handout linked straight from a course page lives under the course's content directory with no
+ * topic of its own, and the only handle on it is its path. Rather than a second pair of tools
+ * that differ in one argument, both file tools take either.
+ */
+const filePathArg = z
+  .string()
+  .describe(
+    "Path of a file in the course's content directory, for files that are not content " +
+      "topics — an assignment template or a PDF linked from a course page, say. Use the path " +
+      "as it appears in the link, e.g. /content/enforced/123456-CS_247/media/template.docx; a " +
+      "full https://learn.uwaterloo.ca/... URL is accepted too. Give this or topic_id, not both.",
+  );
+
+/** Resolves whichever of the two was given, rejecting both-or-neither. */
+function fileTarget(
+  courseId: number,
+  host: string,
+  topicId: number | undefined,
+  path: string | undefined,
+): { kind: "topic"; topicId: number } | { kind: "path"; path: string } {
+  if (topicId !== undefined && path !== undefined) {
+    throw new Error("Give either topic_id or path, not both.");
+  }
+  if (topicId !== undefined) return { kind: "topic", topicId };
+  if (path !== undefined) return { kind: "path", path: resolveCourseFilePath(courseId, host, path) };
+  throw new Error(
+    "No file was named. Give topic_id for a content topic (from get_course_content), or path " +
+      "for a file linked from a course page.",
+  );
+}
+
 export function registerLearnTools(
   server: McpServer,
   config: Config,
@@ -174,19 +213,28 @@ function registerGetFile(server: McpServer, client: D2LClient, course: CourseRes
         "Downloads a file from a course and returns the file itself — same bytes, same name, " +
         "same type — as an attachment the caller can save, open, or unpack. Use it for lecture " +
         "PDFs, assignment starter code, a .zip of provided files, or a .cpp to edit. The file " +
-        "is always returned as an embedded resource, including when it contains text. Topic " +
-        "ids come from get_course_content, on items where isReadable is true.",
+        "is always returned as an embedded resource, including when it contains text. Name the " +
+        "file either by topic_id, from get_course_content where isReadable is true, or by " +
+        "path, for a file linked from a course page that is not a topic of its own.",
       inputSchema: z.object({
         course: courseArg,
-        topic_id: z.number().describe("Topic id of the file, from get_course_content."),
+        topic_id: z
+          .number()
+          .optional()
+          .describe("Topic id of the file, from get_course_content."),
+        path: filePathArg.optional(),
       }),
       outputSchema: getFileOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ course: reference, topic_id }) => {
+    async ({ course: reference, topic_id, path }) => {
       try {
         const target = await course(reference);
-        const file = await getTopicFile(client, target.id, topic_id);
+        const named = fileTarget(target.id, client.host, topic_id, path);
+        const file =
+          named.kind === "topic"
+            ? await getTopicFile(client, target.id, named.topicId)
+            : await getCourseFile(client, named.path);
 
         const header = [
           `${target.name} — ${file.fileName}`,
@@ -208,7 +256,10 @@ function registerGetFile(server: McpServer, client: D2LClient, course: CourseRes
           content.push({
             type: "resource",
             resource: {
-              uri: `d2l://course/${target.id}/topic/${topic_id}/${encodeURIComponent(file.fileName)}`,
+              uri:
+                named.kind === "topic"
+                  ? `d2l://course/${target.id}/topic/${named.topicId}/${encodeURIComponent(file.fileName)}`
+                  : `d2l://course/${target.id}/file${named.path}`,
               name: file.fileName,
               title: file.fileName,
               mimeType: file.mimeType,
@@ -221,7 +272,8 @@ function registerGetFile(server: McpServer, client: D2LClient, course: CourseRes
           content,
           structuredContent: {
             course: { id: target.id, name: target.name },
-            topicId: topic_id,
+            topicId: named.kind === "topic" ? named.topicId : null,
+            path: named.kind === "path" ? named.path : null,
             fileName: file.fileName,
             mimeType: file.mimeType,
             bytes: file.bytes,
@@ -260,17 +312,23 @@ function registerGetFileUrl(
         "only for clients that cannot accept an attached file: if get_file reports that the " +
         "file type is unsupported, or hands back text where a file was wanted, call this and " +
         "download the link into your environment (for example with curl). The link needs no " +
-        "credentials and expires after 10 minutes, so fetch it promptly rather than saving it.",
+        "credentials and expires after 10 minutes, so fetch it promptly rather than saving it. " +
+        "Takes the same two ways of naming a file as get_file: topic_id, or path.",
       inputSchema: z.object({
         course: courseArg,
-        topic_id: z.number().describe("Topic id of the file, from get_course_content."),
+        topic_id: z
+          .number()
+          .optional()
+          .describe("Topic id of the file, from get_course_content."),
+        path: filePathArg.optional(),
       }),
       outputSchema: getFileUrlOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ course: reference, topic_id }) =>
+    async ({ course: reference, topic_id, path }) =>
       guardStructured(async () => {
         const target = await course(reference);
+        const named = fileTarget(target.id, client.host, topic_id, path);
         if (!config.authToken || !config.publicUrl) {
           throw new Error(
             "This deployment cannot issue download links because it has no public URL " +
@@ -280,8 +338,14 @@ function registerGetFileUrl(
 
         // Only the metadata is fetched here — the bytes are fetched again when the link is
         // followed. Downloading twice would double the work for a link that may never be used.
-        const meta = await getTopicFileMetadata(client, target.id, topic_id);
-        const token = signFileToken(target.id, topic_id, config.authToken);
+        const meta =
+          named.kind === "topic"
+            ? await getTopicFileMetadata(client, target.id, named.topicId)
+            : await getCourseFileMetadata(client, named.path);
+        const token =
+          named.kind === "topic"
+            ? signFileToken(target.id, named.topicId, config.authToken)
+            : signCourseFilePathToken(target.id, named.path, config.authToken);
         const url = `${config.publicUrl}/file/${token}`;
         const expiresAt = new Date(Date.now() + FILE_URL_TTL_SECONDS * 1000).toISOString();
 
@@ -297,7 +361,8 @@ function registerGetFileUrl(
           ].join("\n"),
           data: {
             course: { id: target.id, name: target.name },
-            topicId: topic_id,
+            topicId: named.kind === "topic" ? named.topicId : null,
+            path: named.kind === "path" ? named.path : null,
             fileName: meta.fileName,
             mimeType: meta.mimeType,
             bytes: meta.bytes,

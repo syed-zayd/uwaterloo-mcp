@@ -11,6 +11,7 @@
  */
 
 import { D2LClient } from "./client.js";
+import { fileNameFromPath } from "./coursePaths.js";
 
 /** Beyond this the base64 payload would be too large to return in one response. */
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -100,6 +101,16 @@ export async function streamSubmissionFile(
   );
 }
 
+/**
+ * Opens a file addressed by its course path rather than a topic id.
+ *
+ * The path is validated by `resolveCourseFilePath` before it reaches here — this function
+ * assumes that has already happened and does no checking of its own.
+ */
+export async function streamCourseFile(client: D2LClient, path: string): Promise<FileStream> {
+  return streamFile(client, path, fileNameFromPath(path));
+}
+
 async function streamFile(
   client: D2LClient,
   path: string,
@@ -125,6 +136,15 @@ export async function getTopicFileMetadata(
 ): Promise<{ fileName: string; mimeType: string; bytes: number | null }> {
   const stream = await streamTopicFile(client, courseId, topicId);
   // The body is not needed; cancelling releases the connection rather than leaking it.
+  await stream.body.cancel().catch(() => {});
+  return { fileName: stream.fileName, mimeType: stream.mimeType, bytes: stream.bytes };
+}
+
+export async function getCourseFileMetadata(
+  client: D2LClient,
+  path: string,
+): Promise<{ fileName: string; mimeType: string; bytes: number | null }> {
+  const stream = await streamCourseFile(client, path);
   await stream.body.cancel().catch(() => {});
   return { fileName: stream.fileName, mimeType: stream.mimeType, bytes: stream.bytes };
 }
@@ -165,6 +185,11 @@ export async function getSubmissionFile(
     submissionFilePath(courseId, folderId, submissionId, fileId),
     `submission-${submissionId}-file-${fileId}`,
   );
+}
+
+/** The same file as `streamCourseFile`, read into memory for returning in one response. */
+export async function getCourseFile(client: D2LClient, path: string): Promise<CourseFile> {
+  return getFile(client, path, fileNameFromPath(path));
 }
 
 async function getFile(
