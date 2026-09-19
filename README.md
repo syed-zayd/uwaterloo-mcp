@@ -54,4 +54,6 @@ Add a remote MCP server pointing at `/mcp` on your server. When the approval pag
 
 Start with `list_courses` or `piazza_list_courses` — everything else takes a course.
 
+`get_file` and `get_file_url` name a file in either of two ways. Most files are content topics, so `topic_id` from `get_course_content` is the usual one. Some are not: an assignment template, a policy PDF or a handout linked straight from a course page has no topic of its own, and for those pass `path` instead — the link as it appears, e.g. `/content/enforced/123456-CS_247/media/template.docx`, or the full `https://learn.uwaterloo.ca/...` URL. A path must sit inside the named course's own content directory; anything else on Brightspace is refused.
+
 MIT licensed.

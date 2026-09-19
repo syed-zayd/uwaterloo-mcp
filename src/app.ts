@@ -30,7 +30,7 @@ import { createServer, SUPPORTED_PROTOCOL_VERSIONS } from "./server.js";
 import { combinedVerifier } from "./auth.js";
 import { validateMirroredHeaders } from "./headerValidation.js";
 import { D2LClient } from "./d2l/client.js";
-import { streamSubmissionFile, streamTopicFile } from "./d2l/files.js";
+import { streamCourseFile, streamSubmissionFile, streamTopicFile } from "./d2l/files.js";
 import { verifyFileToken } from "./fileUrls.js";
 import {
   D2L_IDLE_WINDOW_MS,
@@ -303,7 +303,7 @@ function registerFileDownloadRoute(app: Express, config: Config): void {
       return;
     }
 
-    const grant = verifyFileToken(req.params.token ?? "", config.authToken);
+    const grant = verifyFileToken(req.params.token ?? "", config.authToken, config.d2l.host);
     if (!grant) {
       res.status(403).type("text/plain").send("This download link is invalid or has expired.");
       return;
@@ -317,13 +317,15 @@ function registerFileDownloadRoute(app: Express, config: Config): void {
       const file =
         grant.kind === "topic"
           ? await streamTopicFile(client, grant.courseId, grant.topicId)
-          : await streamSubmissionFile(
-              client,
-              grant.courseId,
-              grant.folderId,
-              grant.submissionId,
-              grant.fileId,
-            );
+          : grant.kind === "path"
+            ? await streamCourseFile(client, grant.path)
+            : await streamSubmissionFile(
+                client,
+                grant.courseId,
+                grant.folderId,
+                grant.submissionId,
+                grant.fileId,
+              );
 
       // Both filename forms, so a client that understands neither RFC 5987 nor quoting still
       // ends up with a sensible name rather than the token.

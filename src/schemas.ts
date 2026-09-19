@@ -292,7 +292,8 @@ export const serverInfoOutput = z.object({
 
 export const getFileOutput = z.object({
   course: z.object({ id: z.number(), name: z.string() }),
-  topicId: z.number(),
+  topicId: z.number().nullable().describe("Null when the file was addressed by path."),
+  path: z.string().nullable().describe("Null when the file was addressed by topic id."),
   fileName: z.string().describe("The file's real name on Brightspace, e.g. goose.cc."),
   mimeType: z.string(),
   bytes: z.number().describe("Size of the file itself, before base64 encoding."),
@@ -307,7 +308,8 @@ export const getFileOutput = z.object({
 
 export const getFileUrlOutput = z.object({
   course: z.object({ id: z.number(), name: z.string() }),
-  topicId: z.number(),
+  topicId: z.number().nullable().describe("Null when the file was addressed by path."),
+  path: z.string().nullable().describe("Null when the file was addressed by topic id."),
   fileName: z.string(),
   mimeType: z.string(),
   bytes: z.number().nullable().describe("Null when D2L did not report a size."),
