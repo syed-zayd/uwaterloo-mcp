@@ -335,8 +335,13 @@ function registerFileDownloadRoute(app: Express, config: Config): void {
         "Content-Disposition": `attachment; filename="${file.fileName.replace(/"/g, "")}"; filename*=UTF-8''${encoded}`,
         // A signed URL is single-purpose and short-lived; caching it anywhere is wrong.
         "Cache-Control": "no-store",
-        ...(file.bytes !== null ? { "Content-Length": String(file.bytes) } : {}),
       });
+
+      // Deliberately no Content-Length. Brightspace serves text compressed and `fetch`
+      // decompresses it, so the length it reported describes a smaller body than the one being
+      // streamed here; forwarding it makes the client stop early and save a file truncated
+      // mid-token, with a 200 and no error to show for it. Chunked encoding is correct whatever
+      // the upstream did, and the cost is only that a downloader cannot show a progress bar.
 
       await pipeline(Readable.fromWeb(file.body as Parameters<typeof Readable.fromWeb>[0]), res);
     } catch (err) {
