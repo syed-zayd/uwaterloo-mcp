@@ -48,13 +48,15 @@ Add a remote MCP server pointing at `/mcp` on your server. When the approval pag
 
 ## Tools
 
-**Learn** — `server_info`, `list_courses`, `get_upcoming`, `get_grades`, `get_rubric`, `list_assignments`, `get_submissions`, `get_submission_file`, `get_submission_file_url`, `get_course_content`, `get_rubric_definition`, `resolve_link`, `get_file`, `get_file_url`, `get_quiz_attempts`, `get_classlist`, `list_groups`, `get_group`, `list_discussions`, `list_discussion_posts`, `get_discussion_thread`, `get_announcements`
+**Learn** — `server_info`, `list_courses`, `get_upcoming`, `get_grades`, `get_rubric`, `list_assignments`, `get_submissions`, `get_submission_file`, `get_submission_file_url`, `get_course_content`, `list_page_links`, `get_rubric_definition`, `resolve_link`, `get_file`, `get_file_url`, `get_quiz_attempts`, `get_classlist`, `list_groups`, `get_group`, `list_discussions`, `list_discussion_posts`, `get_discussion_thread`, `get_announcements`
 
 **Piazza** — `piazza_list_courses`, `piazza_list_folders`, `piazza_search_posts`, `piazza_get_posts`
 
 Start with `list_courses` or `piazza_list_courses` — everything else takes a course.
 
 `get_rubric_definition` returns the blank rubric for an assignment — every criterion, what it is worth, and the descriptor for each level — so you can see what is being marked before you write. `get_rubric` is the other one: a rubric already filled in on work that has been graded.
+
+`get_course_content` lists topics, which is not everything a course holds: templates, policy PDFs and handouts usually sit in the content directory and are reached only by a link inside some page. `list_page_links` reads one page and lists those files with the paths `get_file` takes, along with the quicklinks the page carries.
 
 Course pages link things by quicklink (`quickLink.d2l?...&rcode=...`) rather than by id. `resolve_link` follows one and says what it points at — a content topic, a rubric, an assignment folder, a discussion, or a file path — so the id can go straight into the tool that needs it. Quiz quicklinks are reported, never followed.
 

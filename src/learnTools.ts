@@ -51,6 +51,7 @@ import {
 import { resolveCourseFilePath } from "./d2l/coursePaths.js";
 import { getSubmissionHistory, resolveDropboxFolder } from "./d2l/submissions.js";
 import { resolveQuickLink } from "./d2l/quicklinks.js";
+import { listPageLinks, type PageLink } from "./d2l/pageLinks.js";
 import { getAssignmentFeedback, type AssignmentFeedback } from "./d2l/feedback.js";
 import { getRubricsForGradeItem, type GradedRubric } from "./d2l/rubrics.js";
 import {
@@ -78,6 +79,7 @@ import {
   getGroupOutput,
   getQuizAttemptsOutput,
   getRubricOutput,
+  listPageLinksOutput,
   rubricDefinitionOutput,
   resolveLinkOutput,
   getSubmissionFileOutput,
@@ -117,6 +119,7 @@ const COURSE_TOOL_NAMES = [
   "get_submission_file_url",
   "get_course_content",
   "resolve_link",
+  "list_page_links",
   "get_file",
   "get_file_url",
   "get_quiz_attempts",
@@ -206,6 +209,7 @@ export function registerLearnTools(
   registerSubmissions(server, client, course, config);
   registerContent(server, client, course);
   registerResolveLink(server, client, course);
+  registerPageLinks(server, client, course);
   registerGetFile(server, client, course);
   registerGetFileUrl(server, client, course, config);
   registerQuizAttempts(server, client, course);
@@ -401,6 +405,86 @@ function renderRubricDefinitions(
   }
 
   return lines.join("\n");
+}
+
+// -------------------------------------------------------------- list_page_links
+
+function registerPageLinks(server: McpServer, client: D2LClient, course: CourseResolver): void {
+  server.registerTool(
+    "list_page_links",
+    {
+      title: "List what a course page links to",
+      description:
+        "Reads one content page and lists what it points at: files in the course directory, " +
+        "quicklinks to other course material, and links off the site. Use it when a page " +
+        "mentions a template, a policy PDF or a handout that get_course_content does not " +
+        "list \u2014 those are not topics, so the module tree cannot see them, and this is " +
+        "how their paths are found. Feed a file path to get_file, and a quicklink code to " +
+        "resolve_link.",
+      inputSchema: z.object({
+        course: courseArg,
+        topic_id: z
+          .number()
+          .describe("Topic id of the page to read, from get_course_content."),
+      }),
+      outputSchema: listPageLinksOutput,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ course: reference, topic_id }) =>
+      guardStructured<z.infer<typeof listPageLinksOutput>>(async () => {
+        const target = await course(reference);
+        const topic = await getTopic(client, target.id, topic_id);
+        const pagePath = topic.Url ?? null;
+
+        if (!pagePath) {
+          throw new Error(
+            `Topic ${topic_id} has no file behind it, so there is no page to read. ` +
+              "Modules and links have no content of their own.",
+          );
+        }
+
+        const links = await listPageLinks(client, target.id, pagePath);
+        return {
+          text: renderPageLinks(target.name, topic.Title ?? String(topic_id), pagePath, links),
+          data: {
+            course: { id: target.id, name: target.name },
+            topicId: topic_id,
+            pagePath,
+            links,
+          },
+        };
+      }),
+  );
+}
+
+function renderPageLinks(
+  courseName: string,
+  title: string,
+  pagePath: string,
+  links: readonly PageLink[],
+): string {
+  if (links.length === 0) return `${courseName} \u2014 ${title}: this page links nothing.`;
+
+  const lines = [`${courseName} \u2014 ${title}`, pagePath, ""];
+  // Files first: they are the reason to call this, and a page's other links are usually
+  // navigation a reader already has.
+  const order: PageLink["kind"][] = ["file", "quicklink", "external", "internal"];
+
+  for (const kind of order) {
+    const group = links.filter((link) => link.kind === kind);
+    if (group.length === 0) continue;
+
+    lines.push(`${kind} (${group.length})`);
+    for (const link of group) {
+      const where = link.path ?? link.url ?? "";
+      const code = link.code ? ` [${link.linkType ?? "link"} ${link.code}]` : "";
+      lines.push(`  ${link.label || "(no text)"}${code}`);
+      if (where) lines.push(`    ${where}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n").trimEnd();
 }
 
 // --------------------------------------------------------------------------- get_file
