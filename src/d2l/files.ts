@@ -118,14 +118,33 @@ async function streamFile(
 ): Promise<FileStream> {
   const response = await client.fetchRaw(path);
   const fileName = fileNameFrom(response) ?? fallbackName;
-  const length = Number(response.headers.get("content-length"));
 
   return {
     fileName,
     mimeType: resolveMimeType(response, fileName),
-    bytes: Number.isFinite(length) && length > 0 ? length : null,
+    bytes: declaredLength(response),
     body: response.body ?? new ReadableStream({ start: (c) => c.close() }),
   };
+}
+
+/**
+ * The body's length in the bytes a caller will actually receive, or null when that is unknown.
+ *
+ * Brightspace serves most text compressed, and `fetch` decompresses transparently — so
+ * `content-length` describes the gzipped body while `response.body` yields the larger
+ * decompressed one. Passing that header on to a client makes it stop reading at the compressed
+ * length, and what lands on disk is a file truncated mid-token with no error anywhere: a
+ * silent, deterministic corruption that looks like a short page rather than a failure.
+ *
+ * There is no header giving the decompressed size, so when the response was encoded the honest
+ * answer is that the length is unknown; the caller sends it chunked instead.
+ */
+function declaredLength(response: Response): number | null {
+  const encoding = (response.headers.get("content-encoding") ?? "").trim().toLowerCase();
+  if (encoding && encoding !== "identity") return null;
+
+  const length = Number(response.headers.get("content-length"));
+  return Number.isFinite(length) && length > 0 ? length : null;
 }
 
 /** Metadata only, for callers that need the name and type without the contents. */
