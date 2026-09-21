@@ -50,9 +50,17 @@ import {
 } from "./d2l/files.js";
 import { resolveCourseFilePath } from "./d2l/coursePaths.js";
 import { getSubmissionHistory, resolveDropboxFolder } from "./d2l/submissions.js";
+import { resolveQuickLink } from "./d2l/quicklinks.js";
 import { listPageLinks, type PageLink } from "./d2l/pageLinks.js";
 import { getAssignmentFeedback, type AssignmentFeedback } from "./d2l/feedback.js";
 import { getRubricsForGradeItem, type GradedRubric } from "./d2l/rubrics.js";
+import {
+  activityRubricPage,
+  fetchRubricDefinition,
+  findRubricPreviews,
+  rubricPreviewPath,
+  type RubricDefinition,
+} from "./d2l/rubricDefinitions.js";
 import {
   FILE_URL_TTL_SECONDS,
   signCourseFilePathToken,
@@ -72,6 +80,8 @@ import {
   getQuizAttemptsOutput,
   getRubricOutput,
   listPageLinksOutput,
+  rubricDefinitionOutput,
+  resolveLinkOutput,
   getSubmissionFileOutput,
   getSubmissionFileUrlOutput,
   getSubmissionsOutput,
@@ -102,11 +112,13 @@ const COURSE_TOOL_NAMES = [
   "list_courses",
   "get_grades",
   "get_rubric",
+  "get_rubric_definition",
   "list_assignments",
   "get_submissions",
   "get_submission_file",
   "get_submission_file_url",
   "get_course_content",
+  "resolve_link",
   "list_page_links",
   "get_file",
   "get_file_url",
@@ -192,9 +204,11 @@ export function registerLearnTools(
   registerListCourses(server, client);
   registerGrades(server, client, course);
   registerRubric(server, client, course);
+  registerRubricDefinition(server, client, course);
   registerAssignments(server, client, course);
   registerSubmissions(server, client, course, config);
   registerContent(server, client, course);
+  registerResolveLink(server, client, course);
   registerPageLinks(server, client, course);
   registerGetFile(server, client, course);
   registerGetFileUrl(server, client, course, config);
@@ -204,6 +218,193 @@ export function registerLearnTools(
   registerDiscussions(server, client, course);
   registerAnnouncements(server, client, course);
   registerUpcoming(server, client);
+}
+
+// ------------------------------------------------------- get_rubric_definition
+
+function registerRubricDefinition(
+  server: McpServer,
+  client: D2LClient,
+  course: CourseResolver,
+): void {
+  server.registerTool(
+    "get_rubric_definition",
+    {
+      title: "Get the rubric an assignment will be marked against",
+      description:
+        "The blank rubric for an assignment: every criterion, what it is worth, and the " +
+        "descriptor for each level — what the work has to do to earn full marks. Use it " +
+        "before writing or submitting, to see what is actually being scored. This is the " +
+        "rubric itself; get_rubric is for one already filled in on marked work. Name the " +
+        "assignment, or pass rubric_id if you already have one.",
+      inputSchema: z.object({
+        course: courseArg,
+        assignment: z
+          .string()
+          .optional()
+          .describe("Assignment name or id, from list_assignments. Its rubrics are returned."),
+        rubric_id: z
+          .number()
+          .optional()
+          .describe("A rubric's own id, when it is already known. Give this or assignment."),
+      }),
+      outputSchema: rubricDefinitionOutput,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ course: reference, assignment, rubric_id }) =>
+      guardStructured<z.infer<typeof rubricDefinitionOutput>>(async () => {
+        const target = await course(reference);
+
+        if (assignment === undefined && rubric_id === undefined) {
+          throw new Error(
+            "Name the assignment whose rubric you want, or pass rubric_id. Assignment names " +
+              "and ids come from list_assignments.",
+          );
+        }
+
+        let activityName: string | null = null;
+        let pages: string[];
+
+        if (rubric_id !== undefined) {
+          pages = [rubricPreviewPath(target.id, rubric_id)];
+        } else {
+          const folder = await resolveDropboxFolder(client, target.id, assignment as string);
+          activityName = folder.Name;
+          // The submission page is where Brightspace links an assignment's rubrics; the links
+          // carry the ids, which are not derivable from the folder itself.
+          const previews = await findRubricPreviews(
+            client,
+            activityRubricPage(target.id, folder.Id),
+          );
+          pages = previews.map((preview) => preview.url);
+        }
+
+        const found = await Promise.all(
+          pages.map((page) => fetchRubricDefinition(client, page).catch(() => null)),
+        );
+        const rubrics = found.filter((rubric): rubric is RubricDefinition => rubric !== null);
+
+        const data = {
+          course: { id: target.id, name: target.name },
+          activity: activityName,
+          rubrics,
+        };
+
+        if (rubrics.length === 0) {
+          return {
+            text: [
+              `${target.name}${activityName ? ` — ${activityName}` : ""}`,
+              "",
+              "No rubric found. Not every assignment has one, and a rubric the instructor has",
+              "not released is not visible to students.",
+            ].join("\n"),
+            data,
+          };
+        }
+
+        return { text: renderRubricDefinitions(target.name, activityName, rubrics), data };
+      }),
+  );
+}
+
+// ----------------------------------------------------------------- resolve_link
+
+function registerResolveLink(server: McpServer, client: D2LClient, course: CourseResolver): void {
+  server.registerTool(
+    "resolve_link",
+    {
+      title: "Find out what a course link points at",
+      description:
+        "Follows a Brightspace quicklink \u2014 the quickLink.d2l?...&rcode=... URLs course " +
+        "pages are full of \u2014 and says what it actually points at, with the id the other " +
+        "tools need. Use it when a page links something by code rather than id: the result " +
+        "gives a topic id for get_file, a rubric id, a folder for get_submissions, or a course " +
+        "path for get_file. Takes the URL or just the rcode. A quiz link is reported but never " +
+        "followed.",
+      inputSchema: z.object({
+        course: courseArg,
+        link: z
+          .string()
+          .describe("A quicklink URL as it appears in the page, or the bare rcode."),
+      }),
+      outputSchema: resolveLinkOutput,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ course: reference, link }) =>
+      guardStructured<z.infer<typeof resolveLinkOutput>>(async () => {
+        const target = await course(reference);
+        const resolved = await resolveQuickLink(client, target.id, link);
+
+        const next =
+          resolved.kind === "topic"
+            ? `Read it with get_file, topic_id ${resolved.id}.`
+            : resolved.kind === "file"
+              ? `Read it with get_file, path ${resolved.filePath}.`
+              : resolved.kind === "rubric"
+                ? `Read it with get_rubric, rubric ${resolved.id}.`
+                : resolved.kind === "dropbox"
+                  ? `Its submissions are in get_submissions, folder ${resolved.id}.`
+                  : resolved.kind === "discussion"
+                    ? `Read it with get_discussion_thread, topic ${resolved.id}.`
+                    : null;
+
+        return {
+          text: [
+            `${target.name} \u2014 ${link}`,
+            `${resolved.kind}${resolved.id === null ? "" : ` ${resolved.id}`}`,
+            resolved.path,
+            resolved.note,
+            next,
+          ]
+            .filter((line): line is string => Boolean(line))
+            .join("\n"),
+          data: {
+            course: { id: target.id, name: target.name },
+            link,
+            kind: resolved.kind,
+            path: resolved.path,
+            id: resolved.id,
+            filePath: resolved.filePath,
+            note: resolved.note,
+          },
+        };
+      }),
+  );
+}
+
+/** Lays the rubric out as a marker reads it: criterion, then each level worth taking. */
+function renderRubricDefinitions(
+  courseName: string,
+  activityName: string | null,
+  rubrics: readonly RubricDefinition[],
+): string {
+  const lines: string[] = [`${courseName}${activityName ? ` — ${activityName}` : ""}`];
+
+  for (const rubric of rubrics) {
+    lines.push("", `${rubric.name ?? "Rubric"}${rubric.outOf === null ? "" : ` — out of ${rubric.outOf}`}`);
+    if (rubric.description) lines.push(rubric.description);
+
+    for (const group of rubric.groups) {
+      // A rubric with one group names it after the rubric; repeating that reads as an error.
+      if (rubric.groups.length > 1 || group.name !== rubric.name) {
+        lines.push("", `${group.name}${group.outOf === null ? "" : ` (${group.outOf})`}`);
+      }
+
+      for (const criterion of group.criteria) {
+        lines.push(
+          "",
+          `  ${criterion.name}${criterion.outOf === null ? "" : ` — out of ${criterion.outOf}`}`,
+        );
+        for (const level of criterion.levels) {
+          const points = level.points === null ? "?" : String(level.points);
+          const name = level.levelName && level.levelName !== "." ? ` ${level.levelName}:` : "";
+          lines.push(`    ${points.padStart(4)} pts${name} ${level.description || "(no descriptor)"}`);
+        }
+      }
+    }
+  }
+
+  return lines.join("\n");
 }
 
 // -------------------------------------------------------------- list_page_links
