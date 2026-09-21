@@ -89,6 +89,45 @@ export const getRubricOutput = z.object({
   rubrics: z.array(gradedRubricSchema),
 });
 
+export const rubricDefinitionOutput = z.object({
+  course: z.object({ id: z.number(), name: z.string() }),
+  activity: z
+    .string()
+    .nullable()
+    .describe("The assignment the rubric was found on, when one was named."),
+  rubrics: z.array(
+    z.object({
+      rubricId: z.number(),
+      name: z.string().nullable(),
+      outOf: z.number().nullable().describe("Total marks the rubric is worth."),
+      description: z.string(),
+      groups: z.array(
+        z.object({
+          name: z.string(),
+          outOf: z.number().nullable(),
+          criteria: z.array(
+            z.object({
+              name: z.string(),
+              outOf: z.number().nullable(),
+              levels: z
+                .array(
+                  z.object({
+                    points: z.number().nullable(),
+                    levelName: z.string().nullable(),
+                    description: z
+                      .string()
+                      .describe("What the work must do to earn this level."),
+                  }),
+                )
+                .describe("Highest-scoring level first."),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
 export const resolveLinkOutput = z.object({
   course: z.object({ id: z.number(), name: z.string() }),
   link: z.string().describe("The link as it was given."),
