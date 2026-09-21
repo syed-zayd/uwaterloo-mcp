@@ -48,11 +48,13 @@ Add a remote MCP server pointing at `/mcp` on your server. When the approval pag
 
 ## Tools
 
-**Learn** — `server_info`, `list_courses`, `get_upcoming`, `get_grades`, `get_rubric`, `list_assignments`, `get_submissions`, `get_submission_file`, `get_submission_file_url`, `get_course_content`, `get_file`, `get_file_url`, `get_quiz_attempts`, `get_classlist`, `list_groups`, `get_group`, `list_discussions`, `list_discussion_posts`, `get_discussion_thread`, `get_announcements`
+**Learn** — `server_info`, `list_courses`, `get_upcoming`, `get_grades`, `get_rubric`, `list_assignments`, `get_submissions`, `get_submission_file`, `get_submission_file_url`, `get_course_content`, `get_rubric_definition`, `get_file`, `get_file_url`, `get_quiz_attempts`, `get_classlist`, `list_groups`, `get_group`, `list_discussions`, `list_discussion_posts`, `get_discussion_thread`, `get_announcements`
 
 **Piazza** — `piazza_list_courses`, `piazza_list_folders`, `piazza_search_posts`, `piazza_get_posts`
 
 Start with `list_courses` or `piazza_list_courses` — everything else takes a course.
+
+`get_rubric_definition` returns the blank rubric for an assignment — every criterion, what it is worth, and the descriptor for each level — so you can see what is being marked before you write. `get_rubric` is the other one: a rubric already filled in on work that has been graded.
 
 `get_file` and `get_file_url` name a file in either of two ways. Most files are content topics, so `topic_id` from `get_course_content` is the usual one. Some are not: an assignment template, a policy PDF or a handout linked straight from a course page has no topic of its own, and for those pass `path` instead — the link as it appears, e.g. `/content/enforced/123456-CS_247/media/template.docx`, or the full `https://learn.uwaterloo.ca/...` URL. A path must sit inside the named course's own content directory; anything else on Brightspace is refused.
 
