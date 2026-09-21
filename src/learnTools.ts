@@ -50,6 +50,7 @@ import {
 } from "./d2l/files.js";
 import { resolveCourseFilePath } from "./d2l/coursePaths.js";
 import { getSubmissionHistory, resolveDropboxFolder } from "./d2l/submissions.js";
+import { resolveQuickLink } from "./d2l/quicklinks.js";
 import { getAssignmentFeedback, type AssignmentFeedback } from "./d2l/feedback.js";
 import { getRubricsForGradeItem, type GradedRubric } from "./d2l/rubrics.js";
 import {
@@ -70,6 +71,7 @@ import {
   getGroupOutput,
   getQuizAttemptsOutput,
   getRubricOutput,
+  resolveLinkOutput,
   getSubmissionFileOutput,
   getSubmissionFileUrlOutput,
   getSubmissionsOutput,
@@ -105,6 +107,7 @@ const COURSE_TOOL_NAMES = [
   "get_submission_file",
   "get_submission_file_url",
   "get_course_content",
+  "resolve_link",
   "get_file",
   "get_file_url",
   "get_quiz_attempts",
@@ -192,6 +195,7 @@ export function registerLearnTools(
   registerAssignments(server, client, course);
   registerSubmissions(server, client, course, config);
   registerContent(server, client, course);
+  registerResolveLink(server, client, course);
   registerGetFile(server, client, course);
   registerGetFileUrl(server, client, course, config);
   registerQuizAttempts(server, client, course);
@@ -200,6 +204,71 @@ export function registerLearnTools(
   registerDiscussions(server, client, course);
   registerAnnouncements(server, client, course);
   registerUpcoming(server, client);
+}
+
+// ----------------------------------------------------------------- resolve_link
+
+function registerResolveLink(server: McpServer, client: D2LClient, course: CourseResolver): void {
+  server.registerTool(
+    "resolve_link",
+    {
+      title: "Find out what a course link points at",
+      description:
+        "Follows a Brightspace quicklink \u2014 the quickLink.d2l?...&rcode=... URLs course " +
+        "pages are full of \u2014 and says what it actually points at, with the id the other " +
+        "tools need. Use it when a page links something by code rather than id: the result " +
+        "gives a topic id for get_file, a rubric id, a folder for get_submissions, or a course " +
+        "path for get_file. Takes the URL or just the rcode. A quiz link is reported but never " +
+        "followed.",
+      inputSchema: z.object({
+        course: courseArg,
+        link: z
+          .string()
+          .describe("A quicklink URL as it appears in the page, or the bare rcode."),
+      }),
+      outputSchema: resolveLinkOutput,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ course: reference, link }) =>
+      guardStructured<z.infer<typeof resolveLinkOutput>>(async () => {
+        const target = await course(reference);
+        const resolved = await resolveQuickLink(client, target.id, link);
+
+        const next =
+          resolved.kind === "topic"
+            ? `Read it with get_file, topic_id ${resolved.id}.`
+            : resolved.kind === "file"
+              ? `Read it with get_file, path ${resolved.filePath}.`
+              : resolved.kind === "rubric"
+                ? `Read it with get_rubric, rubric ${resolved.id}.`
+                : resolved.kind === "dropbox"
+                  ? `Its submissions are in get_submissions, folder ${resolved.id}.`
+                  : resolved.kind === "discussion"
+                    ? `Read it with get_discussion_thread, topic ${resolved.id}.`
+                    : null;
+
+        return {
+          text: [
+            `${target.name} \u2014 ${link}`,
+            `${resolved.kind}${resolved.id === null ? "" : ` ${resolved.id}`}`,
+            resolved.path,
+            resolved.note,
+            next,
+          ]
+            .filter((line): line is string => Boolean(line))
+            .join("\n"),
+          data: {
+            course: { id: target.id, name: target.name },
+            link,
+            kind: resolved.kind,
+            path: resolved.path,
+            id: resolved.id,
+            filePath: resolved.filePath,
+            note: resolved.note,
+          },
+        };
+      }),
+  );
 }
 
 // --------------------------------------------------------------------------- get_file

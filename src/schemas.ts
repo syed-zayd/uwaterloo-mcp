@@ -89,6 +89,21 @@ export const getRubricOutput = z.object({
   rubrics: z.array(gradedRubricSchema),
 });
 
+export const resolveLinkOutput = z.object({
+  course: z.object({ id: z.number(), name: z.string() }),
+  link: z.string().describe("The link as it was given."),
+  kind: z
+    .enum(["topic", "file", "rubric", "dropbox", "quiz", "discussion", "other"])
+    .describe("What the link turned out to point at."),
+  path: z.string().nullable().describe("Where it landed. Null when it was not followed."),
+  id: z
+    .number()
+    .nullable()
+    .describe("Topic, rubric, dropbox folder or discussion id, whichever the kind implies."),
+  filePath: z.string().nullable().describe("For a file: the path get_file takes."),
+  note: z.string().nullable(),
+});
+
 export const rubricCriterionSchema = z.object({
   name: z.string(),
   level: z.string().nullable().describe("The achievement level the instructor selected."),
