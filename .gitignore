@@ -7,3 +7,5 @@ dist/
 *.har
 *.log
 .DS_Store
+.learn-session
+.learn-session.*

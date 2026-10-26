@@ -65,9 +65,9 @@ function howToSignIn(setupUrl: string | undefined): string[] {
   return [
     `Sign in here: ${page}`,
     "",
-    "Give that link to the user. The page signs in through UWaterloo and Duo, or takes a",
-    "session cookie pasted by hand. Once they say they have signed in, run the same",
-    "request again.",
+    "Give that link to the user. It works on a phone: they sign in with their WatIAM login",
+    "and type the three-digit code the page shows into Duo Mobile. Once they say they have",
+    "signed in, run the same request again.",
   ];
 }
 

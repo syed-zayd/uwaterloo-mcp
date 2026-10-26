@@ -13,6 +13,7 @@ import chromium from "@sparticuz/chromium";
 import puppeteer, { type Browser, type Frame, type Page } from "puppeteer-core";
 import type { WaterlooCredentials } from "./config.js";
 import { validateCookie } from "./setup.js";
+import type { StoredBrowserCookie } from "./sessionStore.js";
 
 const WATERLOO_LEARN_HOST = "learn.uwaterloo.ca";
 /**
@@ -46,6 +47,19 @@ export class WaterlooLoginError extends Error {
 export interface WaterlooLoginResult {
   cookie: string;
   duoPrompted: boolean;
+  /**
+   * The UWaterloo, ADFS and Duo cookies the browser ended with. Handing them back to the next
+   * sign-in carries Duo's "trust this browser" decision forward, so that one can often finish
+   * without a phone.
+   */
+  browserCookies: StoredBrowserCookie[];
+}
+
+export interface WaterlooLoginOptions {
+  timeoutMs?: number | undefined;
+  onEvent?: WaterlooLoginEventHandler | undefined;
+  /** Cookies from a previous successful sign-in, restored before anything is opened. */
+  browserCookies?: StoredBrowserCookie[] | undefined;
 }
 
 export type WaterlooLoginEvent =
@@ -88,11 +102,10 @@ let lastClickDiagnostic = "";
 export function signInUWaterloo(
   credentials: WaterlooCredentials,
   host: string,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-  onEvent?: WaterlooLoginEventHandler,
+  options: WaterlooLoginOptions = {},
 ): Promise<WaterlooLoginResult> {
   if (!inFlight) {
-    inFlight = performSignIn(credentials, host, timeoutMs, onEvent).finally(() => {
+    inFlight = performSignIn(credentials, host, options).finally(() => {
       inFlight = null;
     });
   }
@@ -102,8 +115,7 @@ export function signInUWaterloo(
 async function performSignIn(
   credentials: WaterlooCredentials,
   host: string,
-  timeoutMs: number,
-  onEvent?: WaterlooLoginEventHandler,
+  { timeoutMs = DEFAULT_TIMEOUT_MS, onEvent, browserCookies }: WaterlooLoginOptions,
 ): Promise<WaterlooLoginResult> {
   const hostname = new URL(host).hostname.toLowerCase();
   if (hostname !== WATERLOO_LEARN_HOST) {
@@ -123,10 +135,23 @@ async function performSignIn(
     page.setDefaultNavigationTimeout(30_000);
     page.setDefaultTimeout(30_000);
 
+    if (browserCookies?.length) {
+      stage = "restore_browser_cookies";
+      await restoreCookies(browser, browserCookies);
+    }
+
     stage = "open_learn_login";
     await page.goto(`${host}/d2l/login`, { waitUntil: "domcontentloaded" });
     stage = "wait_for_username";
-    await page.waitForSelector("#userNameInput", { visible: true });
+    // Restored cookies can carry a live UWaterloo sign-in, in which case there is no form to
+    // fill: the redirects land straight back in Learn.
+    const remembered = await waitForUsernameOrSession(page, host);
+    if (remembered) {
+      console.info("[waterloo-login] Learn session received without a password", {
+        duoPrompted: false,
+      });
+      return { cookie: remembered, duoPrompted: false, browserCookies: await keptCookies(browser) };
+    }
 
     const username = credentials.username.includes("@")
       ? credentials.username
@@ -152,7 +177,7 @@ async function performSignIn(
     await page.click("#submitButton");
 
     stage = "wait_for_duo_or_learn";
-    return await waitForSession(
+    const session = await waitForSession(
       page,
       host,
       timeoutMs,
@@ -161,6 +186,7 @@ async function performSignIn(
       },
       onEvent,
     );
+    return { ...session, browserCookies: await keptCookies(browser) };
   } catch (error) {
     const location = page ? safePageLocation(page) : "browser-not-open";
     if (error instanceof WaterlooLoginError) {
@@ -240,6 +266,63 @@ function findSystemChrome(): string | undefined {
   return candidates.find((candidate): candidate is string => !!candidate && existsSync(candidate));
 }
 
+/** Puppeteer's cookie objects, narrowed to what survives a round trip through storage. */
+async function restoreCookies(browser: Browser, cookies: StoredBrowserCookie[]): Promise<void> {
+  const now = Date.now() / 1000;
+  const live = cookies.filter((cookie) => cookie.expires <= 0 || cookie.expires > now);
+  if (live.length === 0) return;
+  await browser.setCookie(
+    ...live.map((cookie) => ({
+      name: cookie.name,
+      value: cookie.value,
+      domain: cookie.domain,
+      path: cookie.path,
+      httpOnly: cookie.httpOnly,
+      secure: cookie.secure,
+      ...(cookie.expires > 0 ? { expires: cookie.expires } : {}),
+      ...(cookie.sameSite ? { sameSite: cookie.sameSite } : {}),
+    })),
+  );
+}
+
+/**
+ * The cookies worth carrying into the next sign-in: those that UWaterloo or Duo set to outlive
+ * the browser. Session cookies (no expiry) are deliberately dropped — a real browser forgets
+ * them on close too, and replaying them would make this one behave unlike any browser Duo knows.
+ * Learn's own cookies are dropped as well; they travel separately as the session itself.
+ */
+async function keptCookies(browser: Browser): Promise<StoredBrowserCookie[]> {
+  const cookies = await browser.cookies().catch(() => []);
+  return cookies
+    .filter((cookie) => cookie.expires > 0)
+    .filter((cookie) => !cookie.domain.replace(/^\./, "").endsWith(WATERLOO_LEARN_HOST))
+    .map((cookie) => ({
+      name: cookie.name,
+      value: cookie.value,
+      domain: cookie.domain,
+      path: cookie.path,
+      expires: cookie.expires,
+      httpOnly: cookie.httpOnly ?? false,
+      secure: cookie.secure,
+      ...(cookie.sameSite && cookie.sameSite !== "Default" ? { sameSite: cookie.sameSite } : {}),
+    }));
+}
+
+/** Resolves to a Learn cookie if the sign-in finished on its own, or null once the form shows. */
+async function waitForUsernameOrSession(page: Page, host: string): Promise<string | null> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const cookie = await learnCookie(page, host);
+    if (cookie) return cookie;
+    const visible = await page
+      .$eval("#userNameInput", (element) => (element as HTMLElement).offsetParent !== null)
+      .catch(() => false);
+    if (visible) return null;
+    await delay(250);
+  }
+  throw new Error("UWaterloo's sign-in form did not appear.");
+}
+
 async function replaceInput(page: Page, selector: string, value: string): Promise<void> {
   await page.$eval(selector, (element) => {
     const input = element as HTMLInputElement;
@@ -254,7 +337,7 @@ async function waitForSession(
   timeoutMs: number,
   setStage: (stage: string) => void,
   onEvent?: WaterlooLoginEventHandler,
-): Promise<WaterlooLoginResult> {
+): Promise<Omit<WaterlooLoginResult, "browserCookies">> {
   const deadline = Date.now() + timeoutMs;
   const completedActions = new Set<string>();
   let duoPrompted = false;
@@ -328,7 +411,7 @@ async function waitForSession(
     ) {
       throw new WaterlooLoginError(
         "invalid_credentials",
-        "UWaterloo rejected the configured username or password. The existing D2L session was not changed.",
+        "UWaterloo rejected that username or password. The existing Learn session was not changed.",
       );
     }
 

@@ -12,7 +12,7 @@ Deploy your own. Anyone with your server's URL and token can read everything you
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp&project-name=uwaterloo-mcp&repository-name=uwaterloo-mcp&env=MCP_AUTH_TOKEN%2CPIAZZA_EMAIL%2CPIAZZA_PASSWORD%2CUWATERLOO_USERNAME%2CUWATERLOO_PASSWORD&envDescription=Your%20private%20MCP%20token%2C%20your%20Piazza%20login%2C%20and%20your%20WatIAM%20login.&envLink=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp%23setup)
 
-The form asks for five values:
+The form asks for five values. Only `MCP_AUTH_TOKEN` is required — the WatIAM login can be typed into `/setup` instead.
 
 | Variable | What to enter |
 | --- | --- |
@@ -38,9 +38,11 @@ Open your server's root URL in a browser. It prints the two things steps 2 and 3
 
 Piazza works already. Learn needs a Duo approval, which only you can give.
 
-Open `/setup`, enter your `MCP_AUTH_TOKEN`, and press **Sign in with UWaterloo and Duo**. It shows a three-digit code — type that into Duo Mobile.
+Open `/setup` — a phone works. Enter your `MCP_AUTH_TOKEN` once (the device is remembered), then your WatIAM username and password (your password manager can fill them), and press **Sign in with UWaterloo and Duo**. The page shows a three-digit code — type that into Duo Mobile and you are done. Leave **Remember this login** ticked and later sign-ins are a single tap; once Duo trusts the server, they often need no code at all.
 
-The session is held in memory, so expect to repeat this after a restart, after 180 idle minutes, and on Vercel whenever a new instance starts. To make one last, use **Or paste a session cookie** on that page and save the same value as a `D2L_COOKIE` environment variable.
+**On Vercel, connect a Blob store first**, or the server forgets the session within minutes: in the project open **Storage → Create → Blob**, pick **Private**, connect it to the project, and redeploy. The session (and the login, if you chose to keep it) is stored there encrypted with your `MCP_AUTH_TOKEN`. On a host with a disk it goes to a `.learn-session` file instead, and needs no setup.
+
+Brightspace still ends a session after 180 idle minutes; when that happens your assistant gives you the `/setup` link again. Pasting a session cookie remains available on that page as a fallback.
 
 ### 3. Connect your client
 
