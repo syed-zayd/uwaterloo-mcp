@@ -224,11 +224,24 @@ function registerSetupRoute(app: Express, config: Config): void {
       : " This server could not save the session, so it will be forgotten when this instance " +
         "stops; see the note on the setup page about connecting a Blob store.");
 
+  const isLocalRequest = (req: Request): boolean => {
+    const host = req.hostname.toLowerCase();
+    const ip = req.ip || "";
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      ip === "127.0.0.1" ||
+      ip === "::1" ||
+      ip === "::ffff:127.0.0.1"
+    );
+  };
+
   app.get("/setup", async (req, res) => {
-    if (!rememberedDevice(req)) {
+    if (!rememberedDevice(req) && !isLocalRequest(req)) {
       res.type("html").send(setupPage({ ...(await setupState()), authenticated: false }));
       return;
     }
+    if (isLocalRequest(req)) rememberDevice(req, res);
     res.type("html").send(
       setupPage({
         ...(await setupState()),
@@ -242,8 +255,9 @@ function registerSetupRoute(app: Express, config: Config): void {
     const body = (req.body ?? {}) as Record<string, string | undefined>;
     const provided = (body["token"] ?? "").trim();
     const viaToken = !!config.authToken && tokenMatches(provided, config.authToken);
+    const isLocal = isLocalRequest(req);
 
-    if (config.authToken && !viaToken && !rememberedDevice(req)) {
+    if (config.authToken && !viaToken && !rememberedDevice(req) && !isLocal) {
       res.status(401).type("html").send(
         setupPage({
           ...(await setupState()),
@@ -253,7 +267,7 @@ function registerSetupRoute(app: Express, config: Config): void {
       );
       return;
     }
-    if (viaToken) rememberDevice(req, res);
+    if (viaToken || isLocal) rememberDevice(req, res);
     const tokenEcho = viaToken ? provided : undefined;
 
     const action = body["action"];

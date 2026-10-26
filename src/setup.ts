@@ -180,7 +180,7 @@ function renderSignIn(state: PageState, token: string): string {
       <form method="POST">
         <input type="hidden" name="token" value="${token}">
         <input type="hidden" name="action" value="waterloo">
-        <label for="username">WatIAM username</label>
+        <label for="username">WatIAM username (e.g. jw25smit@uwaterloo.ca)</label>
         <input id="username" name="username" autocomplete="username" autocapitalize="none"
           spellcheck="false" placeholder="jsmith" required>
         <label for="password">Password</label>

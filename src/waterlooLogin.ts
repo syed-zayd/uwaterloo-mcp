@@ -377,6 +377,7 @@ async function waitForSession(
       lastHeartbeatAt = Date.now();
       duoPrompted = true;
       setStage("wait_for_duo_code_entry");
+      console.info(`[waterloo-login] Verified Duo code: ${verificationCode}`);
       if (onEvent) {
         try {
           await onEvent({ type: "duo_verification_code", code: verificationCode });
@@ -449,6 +450,8 @@ async function waitForSession(
       .sort((a, b) => actionPriority(a.decision.action) - actionPriority(b.decision.action));
 
     for (const { state, frame, decision } of decisions) {
+      if (emittedVerificationCode && decision.action === "other_options") continue;
+
       const actionKey = `${decision.action}:${normalizeLabel(decision.label)}`;
       if (completedActions.has(actionKey)) continue;
 
@@ -584,7 +587,9 @@ export function decideDuoAction(state: FrameState): DuoActionDecision | null {
   }
 
   const push = controls.find(({ normalized }) =>
-    /^(?:verify with )?duo push(?: to .+)?$|^send (?:me )?a push$/.test(normalized),
+    normalized.includes("duo push") ||
+    /^(?:send|verify with)(?: a| me a)? push\b/.test(normalized) ||
+    (/\bpush\b/.test(normalized) && !/passcode|sms|text|call|phone|bypass|key|token/.test(normalized)),
   );
   if (push) return { action: "duo_push", label: push.label };
 
@@ -598,7 +603,8 @@ export function decideDuoAction(state: FrameState): DuoActionDecision | null {
 
 export function duoPushIsPending(state: Pick<FrameState, "url" | "text">): boolean {
   if (!/duo|duosecurity/i.test(`${state.url}\n${state.text}`)) return false;
-  return /check (?:for )?a duo push|push (?:notification )?(?:has been |was )?sent|approve (?:the )?(?:login|notification|request)|waiting for (?:a )?(?:duo )?push|enter (?:the )?(?:verification )?code.*duo mobile/i.test(
+  if (extractDuoVerificationCode(state)) return true;
+  return /check (?:for )?a duo push|push (?:notification )?(?:has been |was )?sent|approve (?:the )?(?:login|notification|request)|waiting for (?:a )?(?:duo )?push|enter (?:the )?(?:verification )?code.*duo mobile|duo push sent/is.test(
     state.text,
   );
 }

@@ -11,7 +11,9 @@ import { loadEnvFile } from "node:process";
 import { createApp } from "./app.js";
 import { loadConfig, SERVER_NAME, VERSION, type Config } from "./config.js";
 
-if (existsSync(".env")) loadEnvFile(".env");
+for (const envFile of [".env.local", ".env"]) {
+  if (existsSync(envFile)) loadEnvFile(envFile);
+}
 
 const result = loadConfig(process.env);
 if (!result.ok) {
