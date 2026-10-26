@@ -34,7 +34,7 @@ const RECORD_VERSION = 1;
  * sign-in on one instance reaches the others within a request or two; long enough that a burst
  * of tool calls costs one read rather than one each.
  */
-const REFRESH_INTERVAL_MS = 30_000;
+const REFRESH_INTERVAL_MS = 5_000;
 
 /** A cookie from the sign-in browser, in the shape puppeteer reads and writes. */
 export interface StoredBrowserCookie {
@@ -75,24 +75,69 @@ interface Backend {
 }
 
 function blobBackend(token: string): Backend {
+  let detectedAccess: "private" | "public" = "private";
   return {
     kind: "blob",
     async read() {
-      const { get } = await import("@vercel/blob");
-      // The CDN would happily serve the record from before the last sign-in.
-      const result = await get(BLOB_PATHNAME, { access: "private", useCache: false, token });
-      if (!result?.stream) return null;
-      return Buffer.from(await new Response(result.stream).arrayBuffer());
+      const { get, list, BlobNotFoundError } = await import("@vercel/blob");
+      let lastErr: unknown = null;
+
+      for (const access of [
+        detectedAccess,
+        detectedAccess === "private" ? "public" : "private",
+      ] as const) {
+        try {
+          const result = await get(BLOB_PATHNAME, { access, useCache: false, token });
+          if (!result) return null;
+          if (result.stream) {
+            detectedAccess = access;
+            return Buffer.from(await new Response(result.stream).arrayBuffer());
+          }
+        } catch (err) {
+          if (err instanceof BlobNotFoundError) return null;
+          lastErr = err;
+        }
+      }
+
+      // Fallback: list() works regardless of whether the store is public or private
+      try {
+        const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 5, token });
+        const match = blobs.find((b) => b.pathname === BLOB_PATHNAME) ?? blobs[0];
+        if (!match) return null;
+        const targetUrl = match.downloadUrl || match.url;
+        const res = await fetch(targetUrl, {
+          headers: { Authorization: `Bearer ${token}`, "Cache-Control": "no-cache" },
+        });
+        if (res.status === 404) return null;
+        if (res.ok) return Buffer.from(await res.arrayBuffer());
+      } catch (err) {
+        lastErr ??= err;
+      }
+
+      if (lastErr) throw lastErr;
+      return null;
     },
     async write(data) {
       const { put } = await import("@vercel/blob");
-      await put(BLOB_PATHNAME, data, {
-        access: "private",
-        addRandomSuffix: false,
-        allowOverwrite: true,
-        contentType: "application/octet-stream",
-        token,
-      });
+      try {
+        await put(BLOB_PATHNAME, data, {
+          access: detectedAccess,
+          addRandomSuffix: false,
+          allowOverwrite: true,
+          contentType: "application/octet-stream",
+          token,
+        });
+      } catch {
+        const altAccess = detectedAccess === "private" ? "public" : "private";
+        await put(BLOB_PATHNAME, data, {
+          access: altAccess,
+          addRandomSuffix: false,
+          allowOverwrite: true,
+          contentType: "application/octet-stream",
+          token,
+        });
+        detectedAccess = altAccess;
+      }
     },
   };
 }
@@ -169,6 +214,7 @@ export class SessionStore {
   private record: SessionRecord | null = null;
   private lastReadAt = 0;
   private reading: Promise<void> | null = null;
+  public lastError: string | null = null;
 
   constructor(
     private readonly backend: Backend,
@@ -186,7 +232,7 @@ export class SessionStore {
 
   /** The newest record any instance has written, re-read at most every REFRESH_INTERVAL_MS. */
   async current(force = false): Promise<SessionRecord | null> {
-    if (force || Date.now() - this.lastReadAt >= REFRESH_INTERVAL_MS) {
+    if (force || !this.record || Date.now() - this.lastReadAt >= REFRESH_INTERVAL_MS) {
       this.reading ??= this.refresh().finally(() => {
         this.reading = null;
       });
@@ -199,14 +245,25 @@ export class SessionStore {
     try {
       const data = await this.backend.read();
       const stored = data ? open(data, this.key) : null;
-      if (stored && (!this.record || stored.savedAt >= this.record.savedAt)) this.record = stored;
+      if (stored) {
+        if (!this.record) {
+          this.record = stored;
+        } else if (stored.savedAt >= this.record.savedAt) {
+          this.record = { ...this.record, ...stored };
+        } else {
+          this.record = { ...stored, ...this.record };
+        }
+      }
       this.lastReadAt = Date.now();
+      this.lastError = null;
     } catch (error) {
       // A storage hiccup must not take the tools down with it: keep what this instance knows,
       // and try again on the next request rather than waiting out the interval.
+      const msg = error instanceof Error ? error.message : String(error);
+      this.lastError = msg;
       console.warn("[session-store] read failed", {
         kind: this.backend.kind,
-        error: error instanceof Error ? error.message : String(error),
+        error: msg,
       });
     }
   }
@@ -216,9 +273,16 @@ export class SessionStore {
    * `undefined` are cleared; fields that are absent are kept.
    */
   async update(changes: Partial<Omit<SessionRecord, "v" | "savedAt">>): Promise<void> {
-    const base = (await this.current(true)) ?? { v: RECORD_VERSION, savedAt: 0 };
+    const base = (await this.current(true)) ?? this.record ?? { v: RECORD_VERSION, savedAt: 0 };
     const next: SessionRecord = { ...base, ...changes, v: RECORD_VERSION, savedAt: Date.now() };
-    await this.backend.write(seal(next, this.key));
+    try {
+      await this.backend.write(seal(next, this.key));
+      this.lastError = null;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.lastError = msg;
+      throw error;
+    }
     this.record = next;
     this.lastReadAt = Date.now();
   }
@@ -248,15 +312,15 @@ export function sessionStore(config: Config): SessionStore {
  */
 let adoptedSavedAt = 0;
 
-export async function syncSession(config: Config): Promise<void> {
-  const record = await sessionStore(config).current();
+export async function syncSession(config: Config, force = false): Promise<void> {
+  const record = await sessionStore(config).current(force);
   if (!record) return;
 
-  if (record.cookie && record.savedAt > adoptedSavedAt) {
+  if (record.cookie && (force || record.savedAt > adoptedSavedAt || !config.d2l)) {
     if (config.d2l?.cookie !== record.cookie) {
       config.d2l = { host: config.d2lHost, cookie: record.cookie, csrfToken: undefined };
     }
-    adoptedSavedAt = record.savedAt;
+    adoptedSavedAt = Math.max(adoptedSavedAt, record.savedAt);
   }
 
   if (record.piazza) {
