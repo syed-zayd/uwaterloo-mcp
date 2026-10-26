@@ -92,6 +92,7 @@ export async function pingLearnSession(config: Config): Promise<PingResult> {
  * or silently re-authenticate expired sessions when Keep Signed In is enabled.
  */
 export async function ensureKeepAliveOnRequest(config: Config): Promise<void> {
+  await syncSession(config);
   const store = sessionStore(config);
   const record = await store.current();
   if (!record?.keepAlive || !config.d2l) return;
@@ -111,6 +112,7 @@ export function startKeepAliveRunner(config: Config): () => void {
   // Check once per minute whether a ping is due
   const timer = setInterval(async () => {
     try {
+      await syncSession(config);
       const record = await store.current();
       if (!record?.keepAlive || !config.d2l) return;
 
