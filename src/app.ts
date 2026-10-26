@@ -709,12 +709,16 @@ export function createApp(config: Config): Express {
   app.get("/healthz", async (_req, res) => {
     const store = sessionStore(config);
     const record = await store.current(true);
+    const storageEnvKeys = Object.keys(process.env).filter((k) =>
+      /BLOB|KV|REDIS|STORAGE|UPSTASH|STORE|READ_WRITE/i.test(k),
+    );
     res.json({
       status: "ok",
       server: SERVER_NAME,
       version: VERSION,
       store: store.kind,
       persistent: store.persistent,
+      storageEnvKeys,
       hasSession: !!record?.cookie,
       hasWaterloo: !!record?.waterloo,
       hasPiazza: !!record?.piazza,

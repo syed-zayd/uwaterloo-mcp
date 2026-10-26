@@ -176,8 +176,21 @@ function memoryBackend(): Backend {
   };
 }
 
+function findBlobToken(env: Record<string, string | undefined>): string | undefined {
+  const direct = env.BLOB_READ_WRITE_TOKEN?.trim();
+  if (direct) return direct;
+  for (const [key, val] of Object.entries(env)) {
+    const trimmed = val?.trim();
+    if (!trimmed) continue;
+    if (key.endsWith("_READ_WRITE_TOKEN") || trimmed.startsWith("vercel_blob_rw_")) {
+      return trimmed;
+    }
+  }
+  return undefined;
+}
+
 function chooseBackend(env: Record<string, string | undefined>): Backend {
-  const blobToken = env.BLOB_READ_WRITE_TOKEN?.trim();
+  const blobToken = findBlobToken(env);
   if (blobToken) return blobBackend(blobToken);
   // Serverless filesystems are read-only, or private to one short-lived instance — a file
   // there would look like persistence while being exactly as forgetful as memory.
