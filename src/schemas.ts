@@ -347,7 +347,10 @@ export const serverInfoOutput = z.object({
     configured: z.boolean(),
     waterlooSignInConfigured: z
       .boolean()
-      .describe("Whether server-side WatIAM credentials are configured, enabling /setup to sign in."),
+      .describe(
+        "Whether WatIAM credentials are set in the environment. /setup can sign in either " +
+          "way — without them it asks for the login on the page.",
+      ),
     host: z.string().nullable(),
     sessionAlive: z
       .boolean()

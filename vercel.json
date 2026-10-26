@@ -6,6 +6,7 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 300,
+      "includeFiles": "node_modules/@sparticuz/chromium/bin/**",
       "excludeFiles": "src/index.ts"
     }
   },

@@ -34,12 +34,23 @@ import { streamCourseFile, streamSubmissionFile, streamTopicFile } from "./d2l/f
 import { verifyFileToken } from "./fileUrls.js";
 import {
   D2L_IDLE_WINDOW_MS,
+  readCookie,
+  SETUP_COOKIE,
+  SETUP_COOKIE_MAX_AGE_SECONDS,
+  setupCookieValue,
   setupPage,
   tokenMatches,
   validateCookie,
   type SessionSnapshot,
 } from "./setup.js";
+import {
+  sessionStore,
+  storedPiazzaCredentials,
+  storedWaterlooCredentials,
+  syncSession,
+} from "./sessionStore.js";
 import { signInUWaterloo, WaterlooLoginError, type WaterlooLoginEvent } from "./waterlooLogin.js";
+import { PiazzaClient } from "./piazza/client.js";
 import {
   authorizationServerMetadata,
   beginAuthorize,
@@ -116,23 +127,63 @@ function authorizeParams(source: Record<string, string | undefined>): AuthorizeP
  * `/setup` — establish the Learn session.
  *
  * Guarded by the same token that guards `/mcp`: whoever can call the tools can already read
- * every course, so this grants no new access, and it keeps the number of secrets at one.
+ * every course, so this grants no new access, and it keeps the number of secrets at one. A device
+ * that has entered the token once gets a cookie derived from it, so a phone is not asked again.
  *
- * Nothing else is configurable here. The MCP token and the Piazza and WatIAM logins are
- * deploy-time environment variables that never change while the server runs; only a Brightspace
- * session expires on its own, and only it needs a way back in without a redeploy.
+ * The MCP token and the Piazza login are deploy-time environment variables. The WatIAM login can
+ * be one too, or it can be typed here and (if the person chooses) kept in the session store
+ * beside the session it produced.
  */
 function registerSetupRoute(app: Express, config: Config): void {
   const form = express.urlencoded({ extended: false, limit: "16kb" });
-  const setupState = () => ({ waterlooConfigured: config.waterloo !== null });
+  const store = sessionStore(config);
+
+  const setupState = async (req?: Request) => {
+    await syncSession(config);
+    const saved = config.waterloo ? null : ((await store.current())?.waterloo ?? null);
+    const piazza = await storedPiazzaCredentials(config);
+    const base =
+      config.publicUrl ??
+      (req ? `${req.protocol}://${req.get("host") || "localhost:" + config.port}` : `http://localhost:${config.port}`);
+    return {
+      knownUsername: (config.waterloo ?? saved)?.username ?? null,
+      loginSaved: saved !== null,
+      store: store.kind,
+      piazzaConfigured: !!piazza,
+      piazzaEmail: piazza?.email,
+      serverUrl: `${base}/mcp`,
+      authToken: config.authToken ?? undefined,
+    };
+  };
 
   app.use("/setup", (_req, res, next) => {
     res.set("Cache-Control", "no-store");
     next();
   });
 
+  /** True when this request comes from a device that has already proven it holds the token. */
+  const rememberedDevice = (req: Request): boolean => {
+    if (!config.authToken) return false;
+    const presented = readCookie(req.headers.cookie, SETUP_COOKIE);
+    return !!presented && tokenMatches(presented, setupCookieValue(config.authToken));
+  };
+
+  const rememberDevice = (req: Request, res: Response): void => {
+    if (!config.authToken) return;
+    res.cookie(SETUP_COOKIE, setupCookieValue(config.authToken), {
+      httpOnly: true,
+      // Lax rather than Strict: the usual way here is tapping a link in a chat app, which is a
+      // cross-site navigation that Strict would arrive at without the cookie.
+      sameSite: "lax",
+      secure: req.secure,
+      path: "/setup",
+      maxAge: SETUP_COOKIE_MAX_AGE_SECONDS * 1000,
+    });
+  };
+
   /** A live probe, not a cached guess — and the probe itself resets the idle window it reports. */
   const describeSession = async (): Promise<SessionSnapshot> => {
+    await syncSession(config);
     if (!config.d2l) {
       return { alive: false, reason: "No session has been established on this server yet." };
     }
@@ -146,8 +197,14 @@ function registerSetupRoute(app: Express, config: Config): void {
       : { alive: false, reason: status.reason };
   };
 
-  /** Adopts a cookie only after Brightspace confirms it, so a bad paste cannot break a good session. */
-  const adopt = async (cookie: string): Promise<{ ok: true; who: string } | { ok: false; error: string }> => {
+  /**
+   * Adopts a cookie only after Brightspace confirms it, so a bad paste cannot break a good
+   * session — then writes it to the store, so every instance picks it up.
+   */
+  const adopt = async (
+    cookie: string,
+    extra: Parameters<typeof store.update>[0] = {},
+  ): Promise<{ ok: true; who: string; saved: boolean } | { ok: false; error: string }> => {
     const credentials = { host: config.d2lHost, cookie, csrfToken: undefined };
     const status = await new D2LClient(credentials).sessionStatus();
     if (!status.alive) {
@@ -160,27 +217,73 @@ function registerSetupRoute(app: Express, config: Config): void {
     }
     config.d2l = credentials;
     process.env.D2L_COOKIE = cookie;
-    return { ok: true, who: `${status.user.FirstName} ${status.user.LastName}` };
+
+    let saved = false;
+    try {
+      await store.update({ cookie, ...extra });
+      saved = store.persistent;
+    } catch (error) {
+      console.error("[setup] could not save the session", {
+        store: store.kind,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return { ok: true, who: `${status.user.FirstName} ${status.user.LastName}`, saved };
   };
 
-  app.get("/setup", (_req, res) => {
-    res.type("html").send(setupPage({ ...setupState(), authenticated: false }));
+  const signedInMessage = (who: string, saved: boolean): string =>
+    `Signed in to UWaterloo Learn as ${who}. Learn tools work now — go back to your assistant ` +
+    "and ask again." +
+    (saved
+      ? ""
+      : " This server could not save the session, so it will be forgotten when this instance " +
+        "stops; see the note on the setup page about connecting a Blob store.");
+
+  const isLocalRequest = (req: Request): boolean => {
+    const host = req.hostname.toLowerCase();
+    const ip = req.ip || "";
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      ip === "127.0.0.1" ||
+      ip === "::1" ||
+      ip === "::ffff:127.0.0.1"
+    );
+  };
+
+  app.get("/setup", async (req, res) => {
+    if (!rememberedDevice(req) && !isLocalRequest(req)) {
+      res.type("html").send(setupPage({ ...(await setupState(req)), authenticated: false }));
+      return;
+    }
+    if (isLocalRequest(req)) rememberDevice(req, res);
+    res.type("html").send(
+      setupPage({
+        ...(await setupState(req)),
+        authenticated: true,
+        session: await describeSession(),
+      }),
+    );
   });
 
   app.post("/setup", form, async (req, res) => {
     const body = (req.body ?? {}) as Record<string, string | undefined>;
     const provided = (body["token"] ?? "").trim();
+    const viaToken = !!config.authToken && tokenMatches(provided, config.authToken);
+    const isLocal = isLocalRequest(req);
 
-    if (config.authToken && !tokenMatches(provided, config.authToken)) {
+    if (config.authToken && !viaToken && !rememberedDevice(req) && !isLocal) {
       res.status(401).type("html").send(
         setupPage({
-          ...setupState(),
+          ...(await setupState(req)),
           authenticated: false,
           message: { kind: "error", text: "That token is not correct." },
         }),
       );
       return;
     }
+    if (viaToken || isLocal) rememberDevice(req, res);
+    const tokenEcho = viaToken ? provided : undefined;
 
     const action = body["action"];
     // First POST proves identity; the session forms are only shown afterwards. "check" lands
@@ -188,9 +291,87 @@ function registerSetupRoute(app: Express, config: Config): void {
     if (action === undefined || action === "check") {
       res.type("html").send(
         setupPage({
-          ...setupState(),
+          ...(await setupState(req)),
           authenticated: true,
-          tokenEcho: provided,
+          tokenEcho,
+          session: await describeSession(),
+        }),
+      );
+      return;
+    }
+
+    if (action === "forget") {
+      await store.update({ waterloo: undefined });
+      res.type("html").send(
+        setupPage({
+          ...(await setupState(req)),
+          authenticated: true,
+          tokenEcho,
+          message: { kind: "success", text: "The saved WatIAM login was removed from this server." },
+          session: await describeSession(),
+        }),
+      );
+      return;
+    }
+
+    if (action === "piazza") {
+      const email = (body["email"] ?? "").trim();
+      const password = body["password"] ?? "";
+
+      if (!email || !password) {
+        res.type("html").send(
+          setupPage({
+            ...(await setupState(req)),
+            authenticated: true,
+            tokenEcho,
+            message: { kind: "error", text: "Enter your Piazza email and password." },
+            session: await describeSession(),
+          }),
+        );
+        return;
+      }
+
+      try {
+        const client = new PiazzaClient();
+        await client.login(email, password);
+        config.piazza = { email, password };
+        await store.update({ piazza: { email, password } });
+
+        res.type("html").send(
+          setupPage({
+            ...(await setupState(req)),
+            authenticated: true,
+            tokenEcho,
+            message: { kind: "success", text: `Connected Piazza account (${email}). Piazza tools are now active.` },
+            session: await describeSession(),
+          }),
+        );
+      } catch (err) {
+        const errorText = err instanceof Error ? err.message : String(err);
+        res.type("html").send(
+          setupPage({
+            ...(await setupState(req)),
+            authenticated: true,
+            tokenEcho,
+            message: { kind: "error", text: `Piazza login failed: ${errorText}` },
+            session: await describeSession(),
+          }),
+        );
+      }
+      return;
+    }
+
+    if (action === "piazza_disconnect") {
+      delete process.env.PIAZZA_EMAIL;
+      delete process.env.PIAZZA_PASSWORD;
+      config.piazza = null;
+      await store.update({ piazza: undefined });
+      res.type("html").send(
+        setupPage({
+          ...(await setupState(req)),
+          authenticated: true,
+          tokenEcho,
+          message: { kind: "success", text: "Piazza account disconnected." },
           session: await describeSession(),
         }),
       );
@@ -198,18 +379,20 @@ function registerSetupRoute(app: Express, config: Config): void {
     }
 
     if (action === "waterloo") {
-      if (!config.waterloo) {
+      const typedUsername = (body["username"] ?? "").trim();
+      const typedPassword = body["password"] ?? "";
+      const typed = typedUsername && typedPassword
+        ? { username: typedUsername, password: typedPassword }
+        : null;
+      const credentials = typed ?? (await storedWaterlooCredentials(config));
+
+      if (!credentials) {
         res.type("html").send(
           setupPage({
-            ...setupState(),
+            ...(await setupState(req)),
             authenticated: true,
-            tokenEcho: provided,
-            message: {
-              kind: "error",
-              text:
-                "This server has no WatIAM credentials. Set UWATERLOO_USERNAME and " +
-                "UWATERLOO_PASSWORD in its environment, or paste a cookie instead.",
-            },
+            tokenEcho,
+            message: { kind: "error", text: "Enter your WatIAM username and password." },
           }),
         );
         return;
@@ -220,31 +403,39 @@ function registerSetupRoute(app: Express, config: Config): void {
       beginWaterlooSetupProgress(res);
       let login: Awaited<ReturnType<typeof signInUWaterloo>>;
       try {
-        login = await signInUWaterloo(
-          config.waterloo,
-          config.d2lHost,
-          undefined,
-          (event) => writeWaterlooSetupCode(res, event),
-        );
+        login = await signInUWaterloo(credentials, config.d2lHost, {
+          onEvent: (event) => writeWaterlooSetupCode(res, event),
+          browserCookies: (await store.current())?.browserCookies,
+        });
       } catch (error) {
-        finishWaterlooSetupProgress(
-          res,
-          "error",
+        let message =
           error instanceof WaterlooLoginError
             ? error.message
-            : "UWaterloo sign-in failed without changing the existing Learn session.",
-        );
+            : "UWaterloo sign-in failed without changing the existing Learn session.";
+        // A saved password that has since been changed: drop it so the page asks again.
+        if (
+          error instanceof WaterlooLoginError &&
+          error.code === "invalid_credentials" &&
+          !typed &&
+          !config.waterloo
+        ) {
+          await store.update({ waterloo: undefined }).catch(() => undefined);
+          message += " The saved login was removed — enter it again on the setup page.";
+        }
+        finishWaterlooSetupProgress(res, "error", message);
         return;
       }
 
-      const adopted = await adopt(login.cookie);
+      // A typed login is saved only once UWaterloo has accepted it, and only if asked to.
+      const remember = typed ? body["remember"] === "1" : undefined;
+      const adopted = await adopt(login.cookie, {
+        browserCookies: login.browserCookies,
+        ...(typed && !config.waterloo ? { waterloo: remember ? typed : undefined } : {}),
+      });
       finishWaterlooSetupProgress(
         res,
         adopted.ok ? "success" : "error",
-        adopted.ok
-          ? `Signed in to UWaterloo Learn as ${adopted.who}. Learn tools work now. This session ` +
-              "is held in memory — set D2L_COOKIE in your environment to keep it across restarts."
-          : adopted.error,
+        adopted.ok ? signedInMessage(adopted.who, adopted.saved) : adopted.error,
       );
       return;
     }
@@ -258,9 +449,9 @@ function registerSetupRoute(app: Express, config: Config): void {
     if (!validated.ok) {
       res.type("html").send(
         setupPage({
-          ...setupState(),
+          ...(await setupState(req)),
           authenticated: true,
-          tokenEcho: provided,
+          tokenEcho,
           message: { kind: "error", text: validated.error },
         }),
       );
@@ -270,17 +461,11 @@ function registerSetupRoute(app: Express, config: Config): void {
     const adopted = await adopt(validated.cookie);
     res.type("html").send(
       setupPage({
-        ...setupState(),
+        ...(await setupState(req)),
         authenticated: true,
-        tokenEcho: provided,
+        tokenEcho,
         message: adopted.ok
-          ? {
-              kind: "success",
-              text:
-                `Session accepted — signed in as ${adopted.who}. Learn tools work now. This ` +
-                "session is held in memory; set D2L_COOKIE in your environment to keep it " +
-                "across restarts.",
-            }
+          ? { kind: "success", text: signedInMessage(adopted.who, adopted.saved) }
           : { kind: "error", text: adopted.error },
         session: await describeSession(),
       }),
@@ -298,6 +483,7 @@ function registerSetupRoute(app: Express, config: Config): void {
  */
 function registerFileDownloadRoute(app: Express, config: Config): void {
   app.get("/file/:token", async (req, res) => {
+    await syncSession(config);
     if (!config.d2l || !config.authToken) {
       res.status(503).type("text/plain").send("This server is not configured to serve files.");
       return;
@@ -532,6 +718,8 @@ export function createApp(config: Config): Express {
 
   /** Handles one MCP request with its own server + transport, then disposes of both. */
   async function handleMcp(req: Request, res: Response): Promise<void> {
+    // A session signed in on another instance, or before a restart, is picked up here.
+    await syncSession(config);
     const server = createServer(config);
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless: never mint or require a session id

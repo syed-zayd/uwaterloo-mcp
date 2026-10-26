@@ -1,26 +1,27 @@
 /**
- * The Learn session page — the only place a UWaterloo session is established.
- *
- * Every other secret is deploy-time configuration that never changes. A Brightspace session is
- * the exception: it expires, and renewing it means passing Duo, which needs a person with a
- * browser. Deliberately no MCP tool can do this. A tool call runs under a client timeout, has to
- * relay a Duo code through whatever the client chooses to render, and dies with its response —
- * a browser tab has none of those limits, so the assistant's whole job is to send someone here.
- *
- * Nothing here writes to the hosting environment. A session applies to the running server
- * immediately and is lost on restart; the page says so, and says where to put D2L_COOKIE to
- * make it stick.
+ * Streamlined setup and management dashboard for UWaterloo Learn and Piazza.
  */
 
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import type { StoreKind } from "./sessionStore.js";
 
-/**
- * Brightspace's idle timeout. It publishes no session-expiry endpoint, so a validity horizon can
- * only ever be inferred from this — and any request, including this page's own check, resets it.
- */
+export const SETUP_COOKIE = "uwmcp_setup";
+export const SETUP_COOKIE_MAX_AGE_SECONDS = 120 * 24 * 60 * 60;
+
+export function setupCookieValue(authToken: string): string {
+  return createHmac("sha256", authToken).update("uwaterloo-mcp setup device v1").digest("base64url");
+}
+
+export function readCookie(header: string | undefined, name: string): string | undefined {
+  for (const part of (header ?? "").split(";")) {
+    const index = part.indexOf("=");
+    if (index > 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return undefined;
+}
+
 export const D2L_IDLE_WINDOW_MS = 180 * 60_000;
 
-/** Only the two cookies that actually authenticate are required. */
 export function validateCookie(raw: string): { ok: true; cookie: string } | { ok: false; error: string } {
   const cookie = raw.trim().replace(/^Cookie:\s*/i, "");
   if (!cookie) return { ok: false, error: "Paste the Cookie header value." };
@@ -30,16 +31,13 @@ export function validateCookie(raw: string): { ok: true; cookie: string } | { ok
     if (!names.includes(required)) {
       return {
         ok: false,
-        error:
-          `That does not look like a Brightspace session — ${required} is missing. Copy the ` +
-          `whole Cookie header from a learn.uwaterloo.ca request.`,
+        error: `Invalid Brightspace session — ${required} missing. Copy the Cookie header from a learn.uwaterloo.ca request.`,
       };
     }
   }
   return { ok: true, cookie };
 }
 
-/** Constant-time compare for the page's own access token. */
 export function tokenMatches(provided: string, expected: string): boolean {
   const a = Buffer.from(provided, "utf8");
   const b = Buffer.from(expected, "utf8");
@@ -58,158 +56,359 @@ function escapeHtml(value: string): string {
 
 export interface SessionSnapshot {
   alive: boolean;
-  /** Who the session belongs to, when it is alive. */
   who?: string | undefined;
-  /** Why it is not usable, when it is not. */
   reason?: string | undefined;
-  /** Estimated ISO time the session lapses if nothing touches it. Only meaningful when alive. */
   idleExpiresAt?: string | undefined;
 }
 
 export interface PageState {
   authenticated: boolean;
-  /** Whether UWATERLOO_USERNAME and UWATERLOO_PASSWORD are configured, enabling the Duo flow. */
-  waterlooConfigured: boolean;
+  knownUsername: string | null;
+  loginSaved: boolean;
+  store: StoreKind;
   session?: SessionSnapshot | undefined;
+  piazzaConfigured: boolean;
+  piazzaEmail?: string | undefined;
+  serverUrl?: string | undefined;
+  authToken?: string | undefined;
   message?: { kind: "error" | "success"; text: string } | undefined;
-  /**
-   * The access token, carried in a hidden field so later steps do not ask for it again. The page
-   * is served over HTTPS to someone who already holds this token, so echoing it reveals nothing.
-   */
   tokenEcho?: string | undefined;
-}
-
-function renderSession(session: SessionSnapshot | undefined, token: string): string {
-  if (!session) return "";
-
-  const body = session.alive
-    ? `<p class="verdict ok">Session is valid${session.who ? ` — signed in as ${escapeHtml(session.who)}` : ""}.</p>
-       <p>Brightspace ends a session after 180 minutes with no activity, and it publishes no
-         expiry, so this is an estimate rather than a promise. Checking just now reset the clock:
-         left completely alone it lapses around
-         <b>${escapeHtml(new Date(session.idleExpiresAt ?? Date.now()).toLocaleTimeString())}</b>.
-         Anything you do through the MCP server pushes that out again.</p>`
-    : `<p class="verdict bad">No usable session.</p>
-       ${session.reason ? `<p>${escapeHtml(session.reason)}</p>` : ""}
-       <p>Sign in below, and the Learn tools start working immediately — there is nothing to
-         redeploy and nothing to paste back into your assistant.</p>`;
-
-  return `<section class="first">
-      <h2>Status</h2>
-      ${body}
-      <form method="POST">
-        <input type="hidden" name="token" value="${token}">
-        <input type="hidden" name="action" value="check">
-        <button type="submit" class="secondary">Check again</button>
-      </form>
-    </section>`;
 }
 
 export function setupPage(state: PageState): string {
   const banner = state.message
-    ? `<div class="${state.message.kind}">${escapeHtml(state.message.text)}</div>`
+    ? `<div class="banner ${state.message.kind}">${escapeHtml(state.message.text)}</div>`
     : "";
   const token = escapeHtml(state.tokenEcho ?? "");
+  const serverUrl = state.serverUrl || "http://localhost:8787/mcp";
+  const authToken = state.authToken || "";
 
-  const signIn = state.waterlooConfigured
-    ? `<section>
-         <h2>Sign in with UWaterloo</h2>
-         <p>Uses the WatIAM credentials already configured on this server. The next page shows
-           UWaterloo's three-digit Duo code — enter it in Duo Mobile and it finishes on its own.</p>
-         <form method="POST">
-           <input type="hidden" name="token" value="${token}">
-           <input type="hidden" name="action" value="waterloo">
-           <button type="submit">Sign in with UWaterloo and Duo</button>
-         </form>
-       </section>`
-    : `<section>
-         <h2>Sign in with UWaterloo</h2>
-         <p>Unavailable — this server has no WatIAM credentials. Set
-           <code>UWATERLOO_USERNAME</code> and <code>UWATERLOO_PASSWORD</code> in its environment
-           to enable it, or paste a cookie below.</p>
-       </section>`;
+  if (!state.authenticated) {
+    return layout(`
+      <h1>UWaterloo MCP</h1>
+      <p class="sub">Enter the server token to manage this instance.</p>
+      ${banner}
+      <form method="POST" class="card">
+        <label for="token">Server Access Token</label>
+        <input id="token" name="token" type="password" autocomplete="off" autofocus required>
+        <p class="hint">This device will be remembered automatically after signing in.</p>
+        <button type="submit">Continue</button>
+      </form>
+    `);
+  }
 
-  const body = !state.authenticated
-    ? `<p>Enter this server's access token to continue.</p>
-       <form method="POST">
-         <label for="token">Server access token</label>
-         <input id="token" name="token" type="password" autocomplete="off" autofocus required>
-         <button type="submit">Continue</button>
-       </form>`
-    : `${renderSession(state.session, token)}
-       ${signIn}
-       <section>
-         <h2>Or paste a session cookie</h2>
-         <p>The fallback for when the automated sign-in cannot run — a headless browser is not
-           available on every host, and UWaterloo's login page changes from time to time.</p>
-         <form method="POST">
-           <input type="hidden" name="token" value="${token}">
-           <input type="hidden" name="action" value="cookie">
-           <label for="cookie">Cookie header</label>
-           <textarea id="cookie" name="cookie" rows="4" placeholder="d2lSessionVal=…; d2lSecureSessionVal=…" required></textarea>
-           <button type="submit">Use this session</button>
-         </form>
-         <details>
-           <summary>Where do I find this?</summary>
-           <ol>
-             <li>Open <code>learn.uwaterloo.ca</code> and sign in.</li>
-             <li>Press <kbd>F12</kbd>, open the <b>Network</b> tab, reload the page.</li>
-             <li>Click any request to <code>learn.uwaterloo.ca</code>.</li>
-             <li>Under <b>Request Headers</b>, copy the whole <code>Cookie:</code> value.</li>
-           </ol>
-         </details>
-         <p class="note">A session established here is held by the running server and is lost
-           when it restarts. To keep one across restarts, set <code>D2L_COOKIE</code> in your
-           host's environment — on Vercel that is <b>Project → Settings → Environment
-           Variables</b>, followed by a redeploy.</p>
-       </section>`;
+  const learnActive = state.session?.alive;
+  const learnUser = state.session?.who;
+  const learnExpires = state.session?.idleExpiresAt
+    ? new Date(state.session.idleExpiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : null;
 
+  const claudeDesktopConfig = JSON.stringify(
+    {
+      mcpServers: {
+        uwaterloo: {
+          url: serverUrl,
+          headers: { Authorization: `Bearer ${authToken}` },
+        },
+      },
+    },
+    null,
+    2,
+  );
+
+  return layout(`
+    <header>
+      <h1>UWaterloo MCP</h1>
+      <p class="sub">Manage Learn and Piazza integrations for Claude and ChatGPT.</p>
+    </header>
+
+    ${banner}
+
+    <div class="status-pills">
+      <div class="pill ${learnActive ? "ok" : "warn"}">
+        <span class="dot"></span>
+        Learn: <strong>${learnActive ? `Active (${escapeHtml(learnUser ?? "")})` : "Not signed in"}</strong>
+      </div>
+      <div class="pill ${state.piazzaConfigured ? "ok" : "off"}">
+        <span class="dot"></span>
+        Piazza: <strong>${state.piazzaConfigured ? `Connected (${escapeHtml(state.piazzaEmail ?? "")})` : "Not configured"}</strong>
+      </div>
+    </div>
+
+    <!-- 1. Learn Section -->
+    <div class="card">
+      <h2>Waterloo Learn</h2>
+      ${
+        learnActive
+          ? `
+        <p class="desc">Signed in as <strong>${escapeHtml(learnUser ?? "")}</strong>. Session active until ~<strong>${escapeHtml(learnExpires ?? "")}</strong>.</p>
+        <div class="button-row">
+          <form method="POST" style="display:inline">
+            <input type="hidden" name="token" value="${token}">
+            <input type="hidden" name="action" value="check">
+            <button type="submit" class="secondary">Refresh Status</button>
+          </form>
+          ${
+            state.knownUsername
+              ? `
+          <form method="POST" style="display:inline">
+            <input type="hidden" name="token" value="${token}">
+            <input type="hidden" name="action" value="waterloo">
+            <button type="submit" class="secondary">Re-authenticate (${escapeHtml(state.knownUsername)})</button>
+          </form>`
+              : ""
+          }
+          ${
+            state.loginSaved
+              ? `
+          <form method="POST" style="display:inline">
+            <input type="hidden" name="token" value="${token}">
+            <input type="hidden" name="action" value="forget">
+            <button type="submit" class="text-btn">Forget Login</button>
+          </form>`
+              : ""
+          }
+        </div>
+      `
+          : state.knownUsername
+            ? `
+        <p class="desc">Ready to sign in as <strong>${escapeHtml(state.knownUsername)}</strong> using saved credentials.</p>
+        <form method="POST">
+          <input type="hidden" name="token" value="${token}">
+          <input type="hidden" name="action" value="waterloo">
+          <button type="submit">Sign in with Duo</button>
+        </form>
+        ${
+          state.loginSaved
+            ? `
+        <form method="POST" style="margin-top:.5rem">
+          <input type="hidden" name="token" value="${token}">
+          <input type="hidden" name="action" value="forget">
+          <button type="submit" class="text-btn">Use different WatIAM account</button>
+        </form>`
+            : ""
+        }
+      `
+            : `
+        <p class="desc">Enter your WatIAM login. The next screen displays the 3-digit Duo code to enter in Duo Mobile.</p>
+        <form method="POST">
+          <input type="hidden" name="token" value="${token}">
+          <input type="hidden" name="action" value="waterloo">
+          <label for="username">WatIAM Username</label>
+          <input id="username" name="username" placeholder="jw25smit@uwaterloo.ca" autocomplete="username" required>
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+          <label class="check">
+            <input type="checkbox" name="remember" value="1" checked> Remember credentials securely on this server
+          </label>
+          <button type="submit">Sign in with Duo</button>
+        </form>
+      `
+      }
+
+      <details class="fallback">
+        <summary>Or paste session cookie</summary>
+        <form method="POST" style="margin-top:.8rem">
+          <input type="hidden" name="token" value="${token}">
+          <input type="hidden" name="action" value="cookie">
+          <textarea name="cookie" rows="3" placeholder="d2lSessionVal=...; d2lSecureSessionVal=..." required></textarea>
+          <button type="submit" class="secondary" style="margin-top:.5rem">Save Cookie</button>
+        </form>
+      </details>
+    </div>
+
+    <!-- 2. Piazza Section -->
+    <div class="card">
+      <h2>Piazza</h2>
+      ${
+        state.piazzaConfigured
+          ? `
+        <p class="desc">Connected as <strong>${escapeHtml(state.piazzaEmail ?? "")}</strong>. Piazza tools are active.</p>
+        <form method="POST">
+          <input type="hidden" name="token" value="${token}">
+          <input type="hidden" name="action" value="piazza_disconnect">
+          <button type="submit" class="secondary">Disconnect / Change Account</button>
+        </form>
+      `
+          : `
+        <p class="desc">Optional: add Piazza to search class posts, instructor announcements, and student questions.</p>
+        <form method="POST">
+          <input type="hidden" name="token" value="${token}">
+          <input type="hidden" name="action" value="piazza">
+          <label for="pemail">Piazza Email</label>
+          <input id="pemail" name="email" type="email" placeholder="name@uwaterloo.ca" required>
+          <label for="ppass">Piazza Password</label>
+          <input id="ppass" name="password" type="password" required>
+          <button type="submit" class="secondary" style="margin-top:1rem">Connect Piazza</button>
+        </form>
+      `
+      }
+    </div>
+
+    <!-- 3. Connect Assistant -->
+    <div class="card">
+      <h2>Connect to Claude / ChatGPT</h2>
+      <p class="desc">Use these credentials to connect any AI client to your server.</p>
+
+      <div class="field-copy">
+        <label>MCP Endpoint URL</label>
+        <div class="input-with-copy">
+          <input type="text" readonly value="${escapeHtml(serverUrl)}" id="mcp-url">
+          <button type="button" class="copy-btn" onclick="copyText('mcp-url', this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="field-copy">
+        <label>Authorization Token</label>
+        <div class="input-with-copy">
+          <input type="password" readonly value="${escapeHtml(authToken)}" id="mcp-token">
+          <button type="button" class="copy-btn" onclick="copyText('mcp-token', this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="client-tabs">
+        <details>
+          <summary><b>Claude Desktop</b> (claude_desktop_config.json)</summary>
+          <div class="code-box">
+            <pre id="claude-json">${escapeHtml(claudeDesktopConfig)}</pre>
+            <button type="button" class="copy-btn" onclick="copyText('claude-json', this)">Copy JSON</button>
+          </div>
+        </details>
+        <details>
+          <summary><b>Claude Code CLI</b> (Terminal)</summary>
+          <div class="code-box">
+            <pre id="claude-cli">claude mcp add uwaterloo ${serverUrl} --header "Authorization: Bearer ${authToken}"</pre>
+            <button type="button" class="copy-btn" onclick="copyText('claude-cli', this)">Copy Command</button>
+          </div>
+        </details>
+        <details>
+          <summary><b>ChatGPT</b> (Developer Mode)</summary>
+          <p class="hint" style="margin:.5rem 0 0">In ChatGPT: <b>Settings &gt; Developer mode &gt; Add MCP Server</b>. Paste the <b>Endpoint URL</b> above, select <b>Bearer Token</b>, and paste your token.</p>
+        </details>
+        <details>
+          <summary><b>Web Clients</b> (Claude.ai / ChatGPT Web)</summary>
+          <p class="hint" style="margin:.5rem 0 0">Web browsers require a public HTTPS URL. When running locally or on Docker, expose with a tunnel:<br>
+          <code style="display:inline-block;margin:.3rem 0;padding:.2rem .4rem;background:var(--border);border-radius:4px;font-size:.85rem">cloudflared tunnel --url http://localhost:8787</code><br>
+          Then connect in your browser using the generated HTTPS URL and Bearer token.</p>
+        </details>
+      </div>
+    </div>
+  `);
+}
+
+function layout(content: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UWaterloo MCP — Learn session</title>
+<title>UWaterloo MCP — Setup</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-         max-width: 34rem; margin: 8vh auto; padding: 0 1.25rem; line-height: 1.55; }
-  h1 { font-size: 1.35rem; margin-bottom: .2rem; }
-  h2 { font-size: 1.05rem; margin: 0 0 .2rem; }
-  p { color: #666; font-size: .94rem; }
-  label { display: block; font-weight: 600; font-size: .88rem; margin: 1.3rem 0 .4rem; }
-  input, textarea { width: 100%; padding: .6rem .7rem; font-size: .95rem; box-sizing: border-box;
-         border: 1px solid #bbb; border-radius: .4rem; background: transparent; color: inherit;
-         font-family: inherit; }
-  textarea { font-family: ui-monospace, monospace; font-size: .8rem; }
-  button { margin-top: 1rem; width: 100%; padding: .65rem; font-size: 1rem; font-weight: 600;
-         border: 0; border-radius: .4rem; background: #2f6feb; color: #fff; cursor: pointer; }
-  button.secondary { background: transparent; color: #2f6feb; border: 1px solid currentColor;
-         font-weight: 500; padding: .45rem; font-size: .9rem; }
-  .verdict { font-weight: 600; font-size: 1rem; }
-  .verdict.ok { color: #1c6b38; }
-  .verdict.bad { color: #a3241b; }
-  .error, .success { padding: .7rem .85rem; border-radius: .4rem; font-size: .9rem; margin: 1rem 0; }
-  .error { background: #fdeceb; color: #a3241b; }
-  .success { background: #e8f5ec; color: #1c6b38; }
-  .note { font-size: .85rem; border-left: 2px solid #ccc; padding-left: .8rem; margin-top: 1.5rem; }
-  details { margin-top: 1.5rem; font-size: .87rem; color: #777; }
-  section { border-top: 1px solid #ddd; margin-top: 2rem; padding-top: 1.5rem; }
-  section.first { border-top: 0; margin-top: 1rem; padding-top: 0; }
-  code, kbd { font-family: ui-monospace, monospace; font-size: .85em; }
-  @media (prefers-color-scheme: dark) {
-    .error { background: #3b1c1a; color: #f2b8b3; }
-    .success { background: #16301f; color: #a7d8b8; }
-    .verdict.ok { color: #a7d8b8; }
-    .verdict.bad { color: #f2b8b3; }
-    section, .note { border-color: #333; }
+  :root {
+    --bg: #f8fafc; --card: #ffffff; --text: #0f172a; --muted: #64748b;
+    --border: #e2e8f0; --primary: #2563eb; --primary-hover: #1d4ed8;
+    --success: #15803d; --success-bg: #f0fdf4; --warn: #b45309; --warn-bg: #fffbeb;
+    --err: #b91c1c; --err-bg: #fef2f2;
+    color-scheme: light dark;
   }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0f19; --card: #151d2f; --text: #f8fafc; --muted: #94a3b8;
+      --border: #222f47; --primary: #3b82f6; --primary-hover: #2563eb;
+      --success: #4ade80; --success-bg: #064e3b33; --warn: #fbbf24; --warn-bg: #78350f33;
+      --err: #f87171; --err-bg: #7f1d1d33;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+    max-width: 38rem; margin: 5vh auto; padding: 0 1.25rem 4rem;
+  }
+  header { margin-bottom: 1.5rem; }
+  h1 { font-size: 1.5rem; font-weight: 700; }
+  h2 { font-size: 1.15rem; font-weight: 600; margin-bottom: .25rem; }
+  p.sub { color: var(--muted); font-size: .95rem; margin-top: .15rem; }
+  p.desc { color: var(--muted); font-size: .9rem; margin-bottom: 1rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: .75rem;
+    padding: 1.25rem 1.4rem; margin-bottom: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+  .status-pills { display: flex; gap: .75rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+  .pill {
+    display: inline-flex; align-items: center; gap: .45rem; padding: .4rem .75rem;
+    border-radius: 9999px; font-size: .85rem; border: 1px solid var(--border); background: var(--card);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
+  .pill.ok .dot { background: var(--success); }
+  .pill.warn .dot { background: var(--warn); }
+  .banner { padding: .75rem 1rem; border-radius: .5rem; font-size: .9rem; margin-bottom: 1.25rem; }
+  .banner.success { background: var(--success-bg); color: var(--success); border: 1px solid var(--success); }
+  .banner.error { background: var(--err-bg); color: var(--err); border: 1px solid var(--err); }
+  label { display: block; font-size: .85rem; font-weight: 600; margin: .85rem 0 .3rem; }
+  label:first-child { margin-top: 0; }
+  input[type="text"], input[type="password"], input[type="email"], textarea {
+    width: 100%; padding: .55rem .75rem; font-size: .92rem; border-radius: .4rem;
+    border: 1px solid var(--border); background: transparent; color: inherit; font-family: inherit;
+  }
+  input:focus, textarea:focus { outline: 2px solid var(--primary); border-color: transparent; }
+  label.check {
+    display: flex; gap: .5rem; align-items: center; font-size: .85rem; font-weight: 400;
+    color: var(--muted); margin: .85rem 0 .4rem; cursor: pointer;
+  }
+  label.check input { width: auto; }
+  button {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: .6rem 1.1rem; border-radius: .4rem; font-size: .92rem; font-weight: 600;
+    background: var(--primary); color: #fff; border: 0; cursor: pointer; transition: background .15s;
+    width: 100%; margin-top: .9rem;
+  }
+  button:hover { background: var(--primary-hover); }
+  button.secondary {
+    background: transparent; border: 1px solid var(--border); color: var(--text);
+    width: auto; padding: .45rem .85rem; font-size: .85rem; margin-top: 0;
+  }
+  button.secondary:hover { background: var(--border); }
+  button.text-btn {
+    background: transparent; border: 0; color: var(--primary); width: auto;
+    padding: 0; font-size: .85rem; font-weight: 400; text-decoration: underline; margin-top: .6rem;
+  }
+  .button-row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-top: .5rem; }
+  .fallback { margin-top: 1.25rem; border-top: 1px dashed var(--border); padding-top: .9rem; font-size: .88rem; }
+  summary { cursor: pointer; color: var(--muted); font-size: .88rem; }
+  summary:hover { color: var(--text); }
+  .field-copy { margin-top: .8rem; }
+  .input-with-copy { display: flex; gap: .4rem; align-items: center; }
+  .input-with-copy input { flex: 1; }
+  .copy-btn {
+    width: auto; margin-top: 0; padding: .5rem .85rem; font-size: .82rem; font-weight: 600;
+    background: var(--card); border: 1px solid var(--border); color: var(--text); white-space: nowrap;
+  }
+  .copy-btn:hover { background: var(--border); }
+  .client-tabs { margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: .75rem; }
+  .client-tabs details { margin-top: .6rem; }
+  .code-box { position: relative; margin-top: .4rem; }
+  pre {
+    background: var(--border); padding: .75rem; border-radius: .4rem;
+    font-size: .8rem; font-family: ui-monospace, monospace; overflow-x: auto;
+  }
+  .code-box button { position: absolute; top: .4rem; right: .4rem; margin: 0; padding: .25rem .5rem; font-size: .75rem; }
+  .hint { font-size: .8rem; color: var(--muted); }
 </style>
+<script>
+function copyText(elemId, btn) {
+  const el = document.getElementById(elemId);
+  const text = el.value !== undefined ? el.value : el.innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.innerText;
+    btn.innerText = "Copied!";
+    setTimeout(() => { btn.innerText = orig; }, 2000);
+  });
+}
+</script>
 </head>
 <body>
-  <h1>Learn session</h1>
-  ${banner}
-  ${body}
+  ${content}
 </body>
 </html>`;
 }

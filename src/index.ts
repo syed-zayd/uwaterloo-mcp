@@ -6,12 +6,26 @@
  * hosting platform.
  */
 
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { loadEnvFile } from "node:process";
 import { createApp } from "./app.js";
 import { loadConfig, SERVER_NAME, VERSION, type Config } from "./config.js";
 
-if (existsSync(".env")) loadEnvFile(".env");
+for (const envFile of [".env.local", ".env"]) {
+  if (existsSync(envFile)) loadEnvFile(envFile);
+}
+
+if (!process.env.MCP_AUTH_TOKEN && process.env.MCP_ALLOW_UNAUTHENTICATED !== "true") {
+  const generated = randomBytes(32).toString("base64url");
+  process.env.MCP_AUTH_TOKEN = generated;
+  try {
+    appendFileSync(".env", `\nMCP_AUTH_TOKEN="${generated}"\n`, "utf8");
+    console.log(`[${SERVER_NAME}] generated server token and saved to .env: ${generated}`);
+  } catch {
+    console.log(`[${SERVER_NAME}] generated in-memory server token: ${generated}`);
+  }
+}
 
 const result = loadConfig(process.env);
 if (!result.ok) {
