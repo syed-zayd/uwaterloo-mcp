@@ -60,6 +60,10 @@ export interface SessionRecord {
   piazza?: PiazzaCredentials | undefined;
   /** UWaterloo, ADFS and Duo cookies from the last successful sign-in. */
   browserCookies?: StoredBrowserCookie[] | undefined;
+  /** Whether the auto-ping keep-alive service is active. */
+  keepAlive?: boolean | undefined;
+  /** Timestamp (ms) of the last successful session keep-alive ping. */
+  lastPingAt?: number | undefined;
 }
 
 export type StoreKind = "blob" | "file" | "memory";
