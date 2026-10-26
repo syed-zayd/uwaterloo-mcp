@@ -140,7 +140,7 @@ function registerSetupRoute(app: Express, config: Config): void {
   const store = sessionStore(config);
 
   const setupState = async (req?: Request) => {
-    await syncSession(config);
+    await syncSession(config, true);
     const record = await store.current();
     const saved = config.waterloo ? null : (record?.waterloo ?? null);
     const piazza = await storedPiazzaCredentials(config);
@@ -151,6 +151,7 @@ function registerSetupRoute(app: Express, config: Config): void {
       knownUsername: (config.waterloo ?? saved)?.username ?? null,
       loginSaved: saved !== null,
       store: store.kind,
+      storeError: store.lastError ?? undefined,
       piazzaConfigured: !!piazza,
       piazzaEmail: piazza?.email,
       serverUrl: `${base}/mcp`,
@@ -187,7 +188,7 @@ function registerSetupRoute(app: Express, config: Config): void {
 
   /** A live probe, not a cached guess — and the probe itself resets the idle window it reports. */
   const describeSession = async (): Promise<SessionSnapshot> => {
-    await syncSession(config);
+    await syncSession(config, true);
     if (!config.d2l) {
       return { alive: false, reason: "No session has been established on this server yet." };
     }
@@ -673,7 +674,9 @@ export function createApp(config: Config): Express {
   // prints an https:// URL rather than http://.
   if (config.trustProxy) app.set("trust proxy", true);
 
-  app.get("/", (req, res) => {
+  app.get("/", async (req, res) => {
+    await syncSession(config);
+    const store = sessionStore(config);
     const base = config.publicUrl ?? `${req.protocol}://${req.headers.host}`;
     const lines = [
       `${SERVER_NAME} MCP server v${VERSION} — running.`,
@@ -695,6 +698,7 @@ export function createApp(config: Config): Express {
       "",
       "----",
       "Transport: Streamable HTTP (stateless, MCP 2026-07-28)",
+      `Storage:   ${store.kind}${store.persistent ? "" : " (ephemeral — connect Vercel Blob to persist sessions)"}`,
       `Learn:     ${config.d2l ? "configured" : "not configured"}`,
       `Piazza:    ${config.piazza ? "configured" : "not configured"}`,
     );
@@ -702,8 +706,21 @@ export function createApp(config: Config): Express {
     res.type("text/plain").send(lines.join("\n"));
   });
 
-  app.get("/healthz", (_req, res) => {
-    res.json({ status: "ok", server: SERVER_NAME, version: VERSION });
+  app.get("/healthz", async (_req, res) => {
+    const store = sessionStore(config);
+    const record = await store.current(true);
+    res.json({
+      status: "ok",
+      server: SERVER_NAME,
+      version: VERSION,
+      store: store.kind,
+      persistent: store.persistent,
+      hasSession: !!record?.cookie,
+      hasWaterloo: !!record?.waterloo,
+      hasPiazza: !!record?.piazza,
+      keepAlive: !!record?.keepAlive,
+      storeError: store.lastError,
+    });
   });
 
   registerSetupRoute(app, config);
