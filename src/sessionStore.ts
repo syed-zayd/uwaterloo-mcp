@@ -80,43 +80,55 @@ function blobBackend(token?: string): Backend {
   return {
     kind: "blob",
     async read() {
-      const { get, list, BlobNotFoundError } = await import("@vercel/blob");
-      let lastErr: unknown = null;
+      const { get, list, issueSignedToken, presignUrl, BlobNotFoundError } =
+        await import("@vercel/blob");
 
-      for (const access of [
-        detectedAccess,
-        detectedAccess === "private" ? "public" : "private",
-      ] as const) {
-        try {
-          const result = await get(BLOB_PATHNAME, { access, useCache: false, ...tokenOpt });
-          if (!result) return null;
-          if (result.stream) {
-            detectedAccess = access;
-            return Buffer.from(await new Response(result.stream).arrayBuffer());
-          }
-        } catch (err) {
-          if (err instanceof BlobNotFoundError) return null;
-          lastErr = err;
+      const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 5, ...tokenOpt });
+      const match = blobs.find((b) => b.pathname === BLOB_PATHNAME) ?? blobs[0];
+      if (!match) return null;
+
+      const access: "private" | "public" = match.url.includes(".private.blob.")
+        ? "private"
+        : "public";
+      detectedAccess = access;
+
+      try {
+        const result = await get(match.url, { access, useCache: false, ...tokenOpt });
+        if (!result) return null;
+        if (result.stream) {
+          return Buffer.from(await new Response(result.stream).arrayBuffer());
         }
+      } catch (err) {
+        if (err instanceof BlobNotFoundError) return null;
       }
 
-      // Fallback: list() works regardless of whether the store is public or private
-      try {
-        const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 5, ...tokenOpt });
-        const match = blobs.find((b) => b.pathname === BLOB_PATHNAME) ?? blobs[0];
-        if (!match) return null;
-        const targetUrl = match.downloadUrl || match.url;
-        const headers: Record<string, string> = { "Cache-Control": "no-cache" };
-        if (token) headers.Authorization = `Bearer ${token}`;
-        const res = await fetch(targetUrl, { headers });
+      if (access === "public") {
+        const res = await fetch(match.downloadUrl || match.url, {
+          headers: { "Cache-Control": "no-cache" },
+        });
         if (res.status === 404) return null;
         if (res.ok) return Buffer.from(await res.arrayBuffer());
-      } catch (err) {
-        lastErr ??= err;
       }
 
-      if (lastErr) throw lastErr;
-      return null;
+      const signed = await issueSignedToken({
+        pathname: match.pathname,
+        operations: ["get"],
+        ...tokenOpt,
+      });
+      const { presignedUrl } = await presignUrl(signed, {
+        pathname: match.pathname,
+        access,
+        operation: "get",
+        useCache: false,
+      });
+      const res = await fetch(presignedUrl, {
+        headers: { "Cache-Control": "no-cache" },
+      });
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        throw new Error(`Failed to fetch blob via presigned URL: ${res.status} ${res.statusText}`);
+      }
+      return Buffer.from(await res.arrayBuffer());
     },
     async write(data) {
       const { put } = await import("@vercel/blob");
