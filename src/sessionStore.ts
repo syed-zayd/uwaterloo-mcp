@@ -8,7 +8,7 @@
  *
  * So a session is written somewhere every instance can read:
  *
- *   - Vercel Blob, when the project has a store connected (BLOB_READ_WRITE_TOKEN is set).
+ *   - Vercel Blob, when the project has a store connected (BLOB_READ_WRITE_TOKEN or BLOB_STORE_ID is set).
  *   - A file on disk, on a host with a real filesystem (a laptop, a VPS, Render, Railway…).
  *   - Nowhere, on a serverless host with neither — the page says so rather than pretending.
  *
