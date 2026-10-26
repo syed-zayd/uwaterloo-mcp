@@ -11,6 +11,7 @@ import { randomBytes } from "node:crypto";
 import { loadEnvFile } from "node:process";
 import { createApp } from "./app.js";
 import { loadConfig, SERVER_NAME, VERSION, type Config } from "./config.js";
+import { startKeepAliveRunner } from "./keepAlive.js";
 
 for (const envFile of [".env.local", ".env"]) {
   if (existsSync(envFile)) loadEnvFile(envFile);
@@ -37,6 +38,7 @@ const config: Config = result.config;
 for (const warning of result.warnings) console.warn(`[${SERVER_NAME}] WARNING: ${warning}`);
 
 const app = createApp(config);
+const stopKeepAlive = startKeepAliveRunner(config);
 
 const httpServer = app.listen(config.port, config.host, () => {
   console.log(`[${SERVER_NAME} v${VERSION}] listening on http://${config.host}:${config.port}`);
@@ -46,6 +48,7 @@ const httpServer = app.listen(config.port, config.host, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     console.log(`[${SERVER_NAME}] ${signal} received, shutting down.`);
+    stopKeepAlive();
     httpServer.close(() => process.exit(0));
   });
 }

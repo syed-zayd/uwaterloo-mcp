@@ -71,8 +71,37 @@ export interface PageState {
   piazzaEmail?: string | undefined;
   serverUrl?: string | undefined;
   authToken?: string | undefined;
+  keepAliveEnabled?: boolean | undefined;
+  lastPingAt?: number | undefined;
   message?: { kind: "error" | "success"; text: string } | undefined;
   tokenEcho?: string | undefined;
+}
+
+const KEEP_ALIVE_INTERVAL_MS = 45 * 60_000;
+
+function formatLastPing(ms?: number): string {
+  if (!ms) return "Never";
+  const diffSec = Math.floor((Date.now() - ms) / 1000);
+  if (diffSec < 60) return "Just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ${diffMin % 60}m ago`;
+  return new Date(ms).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatNextPing(ms?: number): string {
+  const base = ms || Date.now();
+  const next = base + KEEP_ALIVE_INTERVAL_MS;
+  const remaining = next - Date.now();
+  if (remaining <= 0) return "Due now";
+  const min = Math.round(remaining / 60_000);
+  return `in ~${min}m`;
 }
 
 export function setupPage(state: PageState): string {
@@ -142,7 +171,40 @@ export function setupPage(state: PageState): string {
         learnActive
           ? `
         <p class="desc">Signed in as <strong>${escapeHtml(learnUser ?? "")}</strong>. Session active until ~<strong>${escapeHtml(learnExpires ?? "")}</strong>.</p>
-        <div class="button-row">
+        
+        <div class="keep-alive-panel">
+          <div class="keep-alive-row">
+            <div>
+              <span class="panel-title">Keep Signed In</span>
+              <span class="sub-desc">Auto-pings Learn every 45 min to prevent session expiration.</span>
+            </div>
+            <form method="POST" style="margin:0">
+              <input type="hidden" name="token" value="${token}">
+              <input type="hidden" name="action" value="toggle_keep_alive">
+              <input type="hidden" name="enabled" value="${state.keepAliveEnabled ? "0" : "1"}">
+              <button type="submit" class="${state.keepAliveEnabled ? "pill-btn active" : "pill-btn"}">
+                ${state.keepAliveEnabled ? "Active" : "Disabled"}
+              </button>
+            </form>
+          </div>
+          ${
+            state.keepAliveEnabled
+              ? `
+          <div class="ping-meta">
+            <span>Last ping: <strong>${escapeHtml(formatLastPing(state.lastPingAt))}</strong></span>
+            <span class="sep">•</span>
+            <span>Next ping: <strong>${escapeHtml(formatNextPing(state.lastPingAt))}</strong></span>
+            <form method="POST" style="display:inline;margin:0 0 0 auto">
+              <input type="hidden" name="token" value="${token}">
+              <input type="hidden" name="action" value="ping_now">
+              <button type="submit" class="tiny-btn">Ping Now</button>
+            </form>
+          </div>`
+              : ""
+          }
+        </div>
+
+        <div class="button-row" style="margin-top:1rem">
           <form method="POST" style="display:inline">
             <input type="hidden" name="token" value="${token}">
             <input type="hidden" name="action" value="check">
@@ -378,6 +440,37 @@ function layout(content: string): string {
   summary { cursor: pointer; color: var(--muted); font-size: .88rem; }
   summary:hover { color: var(--text); }
   .field-copy { margin-top: .8rem; }
+  .keep-alive-panel {
+    background: var(--bg); border: 1px solid var(--border); border-radius: .5rem;
+    padding: .85rem 1rem; margin-top: .85rem;
+  }
+  .keep-alive-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  }
+  .panel-title { font-size: .88rem; font-weight: 600; display: block; }
+  .sub-desc { font-size: .8rem; color: var(--muted); display: block; margin-top: .1rem; }
+  .pill-btn {
+    padding: .35rem .75rem; font-size: .8rem; border-radius: 9999px; width: auto;
+    border: 1px solid var(--border); background: var(--card); color: var(--muted);
+    cursor: pointer; font-weight: 600; transition: all .15s ease; margin-top: 0;
+  }
+  .pill-btn.active {
+    background: var(--success-bg); color: var(--success); border-color: var(--success);
+  }
+  .pill-btn:hover { border-color: var(--primary); }
+  .ping-meta {
+    display: flex; align-items: center; gap: .6rem; margin-top: .6rem;
+    padding-top: .6rem; border-top: 1px solid var(--border);
+    font-size: .8rem; color: var(--muted); flex-wrap: wrap;
+  }
+  .ping-meta strong { color: var(--text); }
+  .sep { color: var(--border); }
+  .tiny-btn {
+    padding: .2rem .55rem; font-size: .75rem; border-radius: .3rem; width: auto;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    cursor: pointer; margin-top: 0;
+  }
+  .tiny-btn:hover { border-color: var(--primary); color: var(--primary); }
   .input-with-copy { display: flex; gap: .4rem; align-items: center; }
   .input-with-copy input { flex: 1; }
   .copy-btn {

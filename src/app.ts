@@ -51,6 +51,7 @@ import {
 } from "./sessionStore.js";
 import { signInUWaterloo, WaterlooLoginError, type WaterlooLoginEvent } from "./waterlooLogin.js";
 import { PiazzaClient } from "./piazza/client.js";
+import { pingLearnSession } from "./keepAlive.js";
 import {
   authorizationServerMetadata,
   beginAuthorize,
@@ -140,7 +141,8 @@ function registerSetupRoute(app: Express, config: Config): void {
 
   const setupState = async (req?: Request) => {
     await syncSession(config);
-    const saved = config.waterloo ? null : ((await store.current())?.waterloo ?? null);
+    const record = await store.current();
+    const saved = config.waterloo ? null : (record?.waterloo ?? null);
     const piazza = await storedPiazzaCredentials(config);
     const base =
       config.publicUrl ??
@@ -153,6 +155,8 @@ function registerSetupRoute(app: Express, config: Config): void {
       piazzaEmail: piazza?.email,
       serverUrl: `${base}/mcp`,
       authToken: config.authToken ?? undefined,
+      keepAliveEnabled: !!record?.keepAlive,
+      lastPingAt: record?.lastPingAt,
     };
   };
 
@@ -378,6 +382,53 @@ function registerSetupRoute(app: Express, config: Config): void {
       return;
     }
 
+    if (action === "toggle_keep_alive") {
+      const enabled = body["enabled"] === "1";
+      if (enabled) {
+        const ping = await pingLearnSession(config);
+        await store.update({ keepAlive: true, lastPingAt: Date.now() });
+        res.type("html").send(
+          setupPage({
+            ...(await setupState(req)),
+            authenticated: true,
+            tokenEcho,
+            message: ping.ok
+              ? { kind: "success", text: "Keep Signed In enabled! Auto-ping will refresh your session every 45 minutes." }
+              : { kind: "error", text: `Keep Signed In enabled, but initial ping failed: ${ping.message}` },
+            session: await describeSession(),
+          }),
+        );
+      } else {
+        await store.update({ keepAlive: false });
+        res.type("html").send(
+          setupPage({
+            ...(await setupState(req)),
+            authenticated: true,
+            tokenEcho,
+            message: { kind: "success", text: "Keep Signed In disabled. Session will expire after 3 hours of inactivity." },
+            session: await describeSession(),
+          }),
+        );
+      }
+      return;
+    }
+
+    if (action === "ping_now") {
+      const ping = await pingLearnSession(config);
+      res.type("html").send(
+        setupPage({
+          ...(await setupState(req)),
+          authenticated: true,
+          tokenEcho,
+          message: ping.ok
+            ? { kind: "success", text: ping.message }
+            : { kind: "error", text: `Ping failed: ${ping.message}` },
+          session: await describeSession(),
+        }),
+      );
+      return;
+    }
+
     if (action === "waterloo") {
       const typedUsername = (body["username"] ?? "").trim();
       const typedPassword = body["password"] ?? "";
@@ -470,6 +521,21 @@ function registerSetupRoute(app: Express, config: Config): void {
         session: await describeSession(),
       }),
     );
+  });
+
+  app.all("/api/keep-alive", async (req, res) => {
+    const authHeader = req.headers.authorization ?? "";
+    const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+    const authMatches = !!(bearer && config.authToken && tokenMatches(bearer, config.authToken));
+    const cronHeader = req.headers["x-vercel-cron"];
+
+    if (!authMatches && !rememberedDevice(req) && !isLocalRequest(req) && !cronHeader) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const result = await pingLearnSession(config);
+    res.status(result.ok ? 200 : 502).json(result);
   });
 }
 
