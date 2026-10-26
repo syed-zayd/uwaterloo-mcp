@@ -189,6 +189,7 @@ function registerSetupRoute(app: Express, config: Config): void {
   /** A live probe, not a cached guess — and the probe itself resets the idle window it reports. */
   const describeSession = async (): Promise<SessionSnapshot> => {
     await syncSession(config, true);
+    await ensureKeepAliveOnRequest(config);
     if (!config.d2l) {
       return { alive: false, reason: "No session has been established on this server yet." };
     }
@@ -676,6 +677,7 @@ export function createApp(config: Config): Express {
 
   app.get("/", async (req, res) => {
     await syncSession(config);
+    await ensureKeepAliveOnRequest(config);
     const store = sessionStore(config);
     const base = config.publicUrl ?? `${req.protocol}://${req.headers.host}`;
     const lines = [
@@ -708,7 +710,9 @@ export function createApp(config: Config): Express {
 
   app.get("/healthz", async (_req, res) => {
     const store = sessionStore(config);
-    const record = await store.current(true);
+    await store.current(true);
+    await ensureKeepAliveOnRequest(config);
+    const record = await store.current();
     const storageEnvKeys = Object.keys(process.env).filter((k) =>
       /BLOB|KV|REDIS|STORAGE|UPSTASH|STORE|READ_WRITE/i.test(k),
     );
@@ -723,6 +727,7 @@ export function createApp(config: Config): Express {
       hasWaterloo: !!record?.waterloo,
       hasPiazza: !!record?.piazza,
       keepAlive: !!record?.keepAlive,
+      lastPingAt: record?.lastPingAt ?? null,
       storeError: store.lastError,
     });
   });
