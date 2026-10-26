@@ -51,7 +51,7 @@ import {
 } from "./sessionStore.js";
 import { signInUWaterloo, WaterlooLoginError, type WaterlooLoginEvent } from "./waterlooLogin.js";
 import { PiazzaClient } from "./piazza/client.js";
-import { pingLearnSession } from "./keepAlive.js";
+import { ensureKeepAliveOnRequest, pingLearnSession } from "./keepAlive.js";
 import {
   authorizationServerMetadata,
   beginAuthorize,
@@ -224,7 +224,13 @@ function registerSetupRoute(app: Express, config: Config): void {
 
     let saved = false;
     try {
-      await store.update({ cookie, ...extra });
+      const existing = await store.current();
+      await store.update({
+        cookie,
+        keepAlive: existing?.keepAlive ?? true,
+        lastPingAt: Date.now(),
+        ...extra,
+      });
       saved = store.persistent;
     } catch (error) {
       console.error("[setup] could not save the session", {
@@ -786,6 +792,7 @@ export function createApp(config: Config): Express {
   async function handleMcp(req: Request, res: Response): Promise<void> {
     // A session signed in on another instance, or before a restart, is picked up here.
     await syncSession(config);
+    await ensureKeepAliveOnRequest(config);
     const server = createServer(config);
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless: never mint or require a session id

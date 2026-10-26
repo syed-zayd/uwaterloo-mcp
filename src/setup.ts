@@ -199,7 +199,14 @@ export function setupPage(state: PageState): string {
               <input type="hidden" name="action" value="ping_now">
               <button type="submit" class="tiny-btn">Ping Now</button>
             </form>
-          </div>`
+          </div>
+          <script>
+            setInterval(() => {
+              fetch("/api/keep-alive", { credentials: "same-origin" })
+                .then((r) => { if (r.ok) location.reload(); })
+                .catch(() => {});
+            }, 45 * 60 * 1000);
+          </script>`
               : ""
           }
         </div>

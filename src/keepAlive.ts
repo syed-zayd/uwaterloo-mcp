@@ -87,6 +87,23 @@ export async function pingLearnSession(config: Config): Promise<PingResult> {
   return { ok: false, message: status.reason };
 }
 
+/**
+ * Called before MCP requests so serverless deployments (like Vercel) automatically refresh
+ * or silently re-authenticate expired sessions when Keep Signed In is enabled.
+ */
+export async function ensureKeepAliveOnRequest(config: Config): Promise<void> {
+  const store = sessionStore(config);
+  const record = await store.current();
+  if (!record?.keepAlive || !config.d2l) return;
+
+  const elapsed = Date.now() - (record.lastPingAt ?? 0);
+  if (elapsed >= KEEP_ALIVE_INTERVAL_MS) {
+    await pingLearnSession(config).catch((err) => {
+      console.warn("[keep-alive] On-request refresh error:", err);
+    });
+  }
+}
+
 /** Background interval runner for long-running processes (Node / Docker). */
 export function startKeepAliveRunner(config: Config): () => void {
   const store = sessionStore(config);
