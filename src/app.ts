@@ -43,8 +43,14 @@ import {
   validateCookie,
   type SessionSnapshot,
 } from "./setup.js";
-import { sessionStore, storedWaterlooCredentials, syncSession } from "./sessionStore.js";
+import {
+  sessionStore,
+  storedPiazzaCredentials,
+  storedWaterlooCredentials,
+  syncSession,
+} from "./sessionStore.js";
 import { signInUWaterloo, WaterlooLoginError, type WaterlooLoginEvent } from "./waterlooLogin.js";
+import { PiazzaClient } from "./piazza/client.js";
 import {
   authorizationServerMetadata,
   beginAuthorize,
@@ -132,12 +138,21 @@ function registerSetupRoute(app: Express, config: Config): void {
   const form = express.urlencoded({ extended: false, limit: "16kb" });
   const store = sessionStore(config);
 
-  const setupState = async () => {
+  const setupState = async (req?: Request) => {
+    await syncSession(config);
     const saved = config.waterloo ? null : ((await store.current())?.waterloo ?? null);
+    const piazza = await storedPiazzaCredentials(config);
+    const base =
+      config.publicUrl ??
+      (req ? `${req.protocol}://${req.get("host") || "localhost:" + config.port}` : `http://localhost:${config.port}`);
     return {
       knownUsername: (config.waterloo ?? saved)?.username ?? null,
       loginSaved: saved !== null,
       store: store.kind,
+      piazzaConfigured: !!piazza,
+      piazzaEmail: piazza?.email,
+      serverUrl: `${base}/mcp`,
+      authToken: config.authToken ?? undefined,
     };
   };
 
@@ -238,13 +253,13 @@ function registerSetupRoute(app: Express, config: Config): void {
 
   app.get("/setup", async (req, res) => {
     if (!rememberedDevice(req) && !isLocalRequest(req)) {
-      res.type("html").send(setupPage({ ...(await setupState()), authenticated: false }));
+      res.type("html").send(setupPage({ ...(await setupState(req)), authenticated: false }));
       return;
     }
     if (isLocalRequest(req)) rememberDevice(req, res);
     res.type("html").send(
       setupPage({
-        ...(await setupState()),
+        ...(await setupState(req)),
         authenticated: true,
         session: await describeSession(),
       }),
@@ -260,7 +275,7 @@ function registerSetupRoute(app: Express, config: Config): void {
     if (config.authToken && !viaToken && !rememberedDevice(req) && !isLocal) {
       res.status(401).type("html").send(
         setupPage({
-          ...(await setupState()),
+          ...(await setupState(req)),
           authenticated: false,
           message: { kind: "error", text: "That token is not correct." },
         }),
@@ -276,7 +291,7 @@ function registerSetupRoute(app: Express, config: Config): void {
     if (action === undefined || action === "check") {
       res.type("html").send(
         setupPage({
-          ...(await setupState()),
+          ...(await setupState(req)),
           authenticated: true,
           tokenEcho,
           session: await describeSession(),
@@ -289,10 +304,74 @@ function registerSetupRoute(app: Express, config: Config): void {
       await store.update({ waterloo: undefined });
       res.type("html").send(
         setupPage({
-          ...(await setupState()),
+          ...(await setupState(req)),
           authenticated: true,
           tokenEcho,
           message: { kind: "success", text: "The saved WatIAM login was removed from this server." },
+          session: await describeSession(),
+        }),
+      );
+      return;
+    }
+
+    if (action === "piazza") {
+      const email = (body["email"] ?? "").trim();
+      const password = body["password"] ?? "";
+
+      if (!email || !password) {
+        res.type("html").send(
+          setupPage({
+            ...(await setupState(req)),
+            authenticated: true,
+            tokenEcho,
+            message: { kind: "error", text: "Enter your Piazza email and password." },
+            session: await describeSession(),
+          }),
+        );
+        return;
+      }
+
+      try {
+        const client = new PiazzaClient();
+        await client.login(email, password);
+        config.piazza = { email, password };
+        await store.update({ piazza: { email, password } });
+
+        res.type("html").send(
+          setupPage({
+            ...(await setupState(req)),
+            authenticated: true,
+            tokenEcho,
+            message: { kind: "success", text: `Connected Piazza account (${email}). Piazza tools are now active.` },
+            session: await describeSession(),
+          }),
+        );
+      } catch (err) {
+        const errorText = err instanceof Error ? err.message : String(err);
+        res.type("html").send(
+          setupPage({
+            ...(await setupState(req)),
+            authenticated: true,
+            tokenEcho,
+            message: { kind: "error", text: `Piazza login failed: ${errorText}` },
+            session: await describeSession(),
+          }),
+        );
+      }
+      return;
+    }
+
+    if (action === "piazza_disconnect") {
+      delete process.env.PIAZZA_EMAIL;
+      delete process.env.PIAZZA_PASSWORD;
+      config.piazza = null;
+      await store.update({ piazza: undefined });
+      res.type("html").send(
+        setupPage({
+          ...(await setupState(req)),
+          authenticated: true,
+          tokenEcho,
+          message: { kind: "success", text: "Piazza account disconnected." },
           session: await describeSession(),
         }),
       );
@@ -310,7 +389,7 @@ function registerSetupRoute(app: Express, config: Config): void {
       if (!credentials) {
         res.type("html").send(
           setupPage({
-            ...(await setupState()),
+            ...(await setupState(req)),
             authenticated: true,
             tokenEcho,
             message: { kind: "error", text: "Enter your WatIAM username and password." },
@@ -370,7 +449,7 @@ function registerSetupRoute(app: Express, config: Config): void {
     if (!validated.ok) {
       res.type("html").send(
         setupPage({
-          ...(await setupState()),
+          ...(await setupState(req)),
           authenticated: true,
           tokenEcho,
           message: { kind: "error", text: validated.error },
@@ -382,7 +461,7 @@ function registerSetupRoute(app: Express, config: Config): void {
     const adopted = await adopt(validated.cookie);
     res.type("html").send(
       setupPage({
-        ...(await setupState()),
+        ...(await setupState(req)),
         authenticated: true,
         tokenEcho,
         message: adopted.ok

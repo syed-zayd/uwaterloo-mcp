@@ -232,7 +232,7 @@ async function launchBrowser(): Promise<Browser> {
   const headless = useServerlessChromium ? "shell" : true;
   const args = useServerlessChromium
     ? await puppeteer.defaultArgs({ args: chromium.args, headless })
-    : ["--disable-dev-shm-usage"];
+    : ["--disable-dev-shm-usage", "--no-sandbox", "--disable-setuid-sandbox"];
 
   return puppeteer.launch({
     args,

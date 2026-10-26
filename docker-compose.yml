@@ -1,0 +1,19 @@
+services:
+  uwaterloo-mcp:
+    build: .
+    container_name: uwaterloo-mcp
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      - PORT=8787
+      - HOST=0.0.0.0
+      # Optional: specify an auth token, or let the server auto-generate one on startup
+      # - MCP_AUTH_TOKEN=your-random-token-at-least-24-chars
+      # Optional: configure your public HTTPS URL when accessing over the web (e.g. Cloudflare Tunnel, ngrok)
+      # - MCP_PUBLIC_URL=https://mcp.yourdomain.com
+    volumes:
+      - mcp-data:/app/data
+
+volumes:
+  mcp-data:

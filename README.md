@@ -4,49 +4,55 @@ A read-only MCP server for UWaterloo Learn and Piazza. It reads; it never submit
 
 Deploy your own. Anyone with your server's URL and token can read everything you can read in Learn.
 
-## Setup
+## Setup & Deployment
 
-### 1. Deploy
+### Option A: Local (Fastest)
 
-**With Vercel**
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp&project-name=uwaterloo-mcp&repository-name=uwaterloo-mcp&env=MCP_AUTH_TOKEN%2CPIAZZA_EMAIL%2CPIAZZA_PASSWORD%2CUWATERLOO_USERNAME%2CUWATERLOO_PASSWORD&envDescription=Your%20private%20MCP%20token%2C%20your%20Piazza%20login%2C%20and%20your%20WatIAM%20login.&envLink=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp%23setup)
-
-The form asks for five values. Only `MCP_AUTH_TOKEN` is required — the WatIAM login can be typed into `/setup` instead.
-
-| Variable | What to enter |
-| --- | --- |
-| `MCP_AUTH_TOKEN` | A random string, 24+ characters. Your server's password — you paste it again in steps 2 and 3. |
-| `PIAZZA_EMAIL` | Your Piazza email. |
-| `PIAZZA_PASSWORD` | Your Piazza password. |
-| `UWATERLOO_USERNAME` | Your WatIAM username — `@uwaterloo.ca` is appended for you, and the full form works too. Note this is your WatIAM login, which is not always your `@uwaterloo.ca` email alias. |
-| `UWATERLOO_PASSWORD` | Your WatIAM password. |
-
-**Locally** — needs Node 22.17+, and Chrome for the Duo sign-in.
+Requires Node 22.17+ and Chrome.
 
 ```bash
 git clone https://github.com/syed-zayd/uwaterloo-mcp.git
 cd uwaterloo-mcp
 npm install
-cp .env.example .env   # edit it — the server won't start without MCP_AUTH_TOKEN
 npm start
 ```
 
-Open your server's root URL in a browser. It prints the two things steps 2 and 3 need.
+On first boot, the server automatically generates a secure token and prints your `/setup` link.
 
-### 2. Sign in to Learn
+### Option B: Docker / Self-Hosted (Zero Vendor Lock-in)
 
-Piazza works already. Learn needs a Duo approval, which only you can give.
+Runs anywhere with Docker (Home server, VPS, Fly.io, Railway, Render). Includes headless Chromium and persistent storage out of the box.
 
-Open `/setup` — a phone works. Enter your `MCP_AUTH_TOKEN` once (the device is remembered), then your WatIAM username and password (your password manager can fill them), and press **Sign in with UWaterloo and Duo**. The page shows a three-digit code — type that into Duo Mobile and you are done. Leave **Remember this login** ticked and later sign-ins are a single tap; once Duo trusts the server, they often need no code at all.
+```bash
+docker compose up -d
+```
 
-**On Vercel, connect a Blob store first**, or the server forgets the session within minutes: in the project open **Storage → Create → Blob**, pick **Private**, connect it to the project, and redeploy. The session (and the login, if you chose to keep it) is stored there encrypted with your `MCP_AUTH_TOKEN`. On a host with a disk it goes to a `.learn-session` file instead, and needs no setup.
+### Option C: Vercel (Serverless)
 
-Brightspace still ends a session after 180 idle minutes; when that happens your assistant gives you the `/setup` link again. Pasting a session cookie remains available on that page as a fallback.
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp&project-name=uwaterloo-mcp&repository-name=uwaterloo-mcp&env=MCP_AUTH_TOKEN&envDescription=Your%20private%20MCP%20token.&envLink=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp%23setup)
 
-### 3. Connect your client
+> [!NOTE]
+> On Vercel, connect a **Blob** store (**Storage → Create → Blob → Private**) so your session persists across serverless instances.
 
-Add a remote MCP server pointing at `/mcp` on your server. When the approval page asks for a token, paste your `MCP_AUTH_TOKEN`.
+---
+
+## Manage via `/setup`
+
+Open `http://localhost:8787/setup` in your browser:
+
+1. **Waterloo Learn**: Enter your WatIAM username and password. The screen will display a 3-digit verification code to enter in your Duo Mobile app. You're signed in! Subsequent sign-ins can reuse trusted browser cookies.
+2. **Piazza**: Enter your Piazza email and password to activate Piazza post searching and course feeds.
+3. **Connect Assistant**: 1-click copy snippets for **Claude Desktop**, **Claude Code CLI**, and **ChatGPT / Claude.ai Web**.
+
+### Connecting from Web Clients (Claude.ai / ChatGPT Web)
+
+Web clients require a public HTTPS URL. If self-hosting, expose your port securely via Cloudflare Tunnel or ngrok:
+
+```bash
+cloudflared tunnel --url http://localhost:8787
+```
+
+Then use the provided HTTPS URL with your Bearer token in Claude.ai or ChatGPT.
 
 ## Tools
 

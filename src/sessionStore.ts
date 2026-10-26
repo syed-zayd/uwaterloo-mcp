@@ -24,7 +24,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Config, WaterlooCredentials } from "./config.js";
+import type { Config, PiazzaCredentials, WaterlooCredentials } from "./config.js";
 
 const BLOB_PATHNAME = "uwaterloo-mcp/learn-session.bin";
 const RECORD_VERSION = 1;
@@ -56,6 +56,8 @@ export interface SessionRecord {
   cookie?: string | undefined;
   /** The WatIAM login, only when the person chose to keep it here. */
   waterloo?: WaterlooCredentials | undefined;
+  /** Piazza credentials, when configured via /setup. */
+  piazza?: PiazzaCredentials | undefined;
   /** UWaterloo, ADFS and Duo cookies from the last successful sign-in. */
   browserCookies?: StoredBrowserCookie[] | undefined;
 }
@@ -244,13 +246,20 @@ let adoptedSavedAt = 0;
 
 export async function syncSession(config: Config): Promise<void> {
   const record = await sessionStore(config).current();
-  if (!record?.cookie || record.savedAt <= adoptedSavedAt) return;
-  if (config.d2l?.cookie === record.cookie) {
+  if (!record) return;
+
+  if (record.cookie && record.savedAt > adoptedSavedAt) {
+    if (config.d2l?.cookie !== record.cookie) {
+      config.d2l = { host: config.d2lHost, cookie: record.cookie, csrfToken: undefined };
+    }
     adoptedSavedAt = record.savedAt;
-    return;
   }
-  config.d2l = { host: config.d2lHost, cookie: record.cookie, csrfToken: undefined };
-  adoptedSavedAt = record.savedAt;
+
+  if (record.piazza) {
+    config.piazza = record.piazza;
+  } else if (!process.env.PIAZZA_EMAIL) {
+    config.piazza = null;
+  }
 }
 
 /** The WatIAM login to sign in with: the environment's, else one saved from /setup. */
@@ -259,4 +268,12 @@ export async function storedWaterlooCredentials(
 ): Promise<WaterlooCredentials | null> {
   if (config.waterloo) return config.waterloo;
   return (await sessionStore(config).current())?.waterloo ?? null;
+}
+
+/** The Piazza login to sign in with: the environment's, else one saved from /setup. */
+export async function storedPiazzaCredentials(
+  config: Config,
+): Promise<PiazzaCredentials | null> {
+  if (config.piazza) return config.piazza;
+  return (await sessionStore(config).current())?.piazza ?? null;
 }
