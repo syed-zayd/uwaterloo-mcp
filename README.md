@@ -1,73 +1,100 @@
 # UWaterloo MCP
 
-A read-only MCP server for UWaterloo Learn and Piazza. It reads; it never submits or posts.
+Connect your **UWaterloo Learn** and **Piazza** accounts to **Claude**, **ChatGPT**, and **Claude Code**.
 
-Deploy your own. Anyone with your server's URL and token can read everything you can read in Learn.
+Read-only: reads course materials, announcements, grades, assignments, quizzes, and Piazza discussions. Never submits or posts.
 
-## Setup & Deployment
+---
 
-### Option A: Local (Fastest)
+## Quickstart in 3 Steps
 
-Requires Node 22.17+ and Chrome.
+### 1. Start the server
+
+Choose **Docker** (recommended) or **Node.js**:
 
 ```bash
+# Option A: Docker (Zero configuration, includes browser & persistent storage)
+git clone https://github.com/syed-zayd/uwaterloo-mcp.git
+cd uwaterloo-mcp
+docker compose up -d
+```
+
+*Or with Node.js directly:*
+```bash
+# Option B: Node 22+
 git clone https://github.com/syed-zayd/uwaterloo-mcp.git
 cd uwaterloo-mcp
 npm install
 npm start
 ```
 
-On first boot, the server automatically generates a secure token and prints your `/setup` link.
+### 2. Configure at `/setup`
 
-### Option B: Docker / Self-Hosted (Zero Vendor Lock-in)
+Open **[http://localhost:8787/setup](http://localhost:8787/setup)** in your browser:
 
-Runs anywhere with Docker (Home server, VPS, Fly.io, Railway, Render). Includes headless Chromium and persistent storage out of the box.
+1. **Waterloo Learn**: Enter your WatIAM username and password. Enter the 3-digit verification code in your Duo Mobile app. Subsequent logins bypass Duo using remembered browser cookies.
+2. **Piazza**: Enter your Piazza email and password to enable class feeds and post searches.
 
-```bash
-docker compose up -d
-```
+### 3. Connect your AI
 
-### Option C: Vercel (Serverless)
+Copy the ready-to-use config straight from the `/setup` page:
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp&project-name=uwaterloo-mcp&repository-name=uwaterloo-mcp&env=MCP_AUTH_TOKEN&envDescription=Your%20private%20MCP%20token.&envLink=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp%23setup)
-
-> [!NOTE]
-> On Vercel, connect a **Blob** store (**Storage → Create → Blob → Private**) so your session persists across serverless instances.
+- **Claude Desktop**: Paste the generated snippet into `claude_desktop_config.json`:
+  ```json
+  {
+    "mcpServers": {
+      "uwaterloo": {
+        "url": "http://localhost:8787/mcp",
+        "headers": { "Authorization": "Bearer YOUR_TOKEN" }
+      }
+    }
+  }
+  ```
+- **Claude Code CLI**: Run the one-line command:
+  ```bash
+  claude mcp add uwaterloo http://localhost:8787/mcp --header "Authorization: Bearer YOUR_TOKEN"
+  ```
+- **Claude.ai & ChatGPT Web**: Web browsers require a public HTTPS URL. Run a secure tunnel:
+  ```bash
+  cloudflared tunnel --url http://localhost:8787
+  ```
+  Then paste the generated `https://.../mcp` URL and your Bearer token into ChatGPT Developer mode or Claude.ai.
 
 ---
 
-## Manage via `/setup`
+## Deployment Options
 
-Open `http://localhost:8787/setup` in your browser:
+| Method | Best For | Persistent Storage | Notes |
+| --- | --- | --- | --- |
+| **Docker Compose** | Local, VPS, Home Server | Built-in volume (`mcp-data`) | Recommended. Zero vendor lock-in. |
+| **Node.js Local** | Fast local dev | Local `.learn-session` file | Needs Node 22+ & Chrome installed. |
+| **Vercel** | Free cloud hosting | Connect Vercel Blob (Private) | One-click button below. |
 
-1. **Waterloo Learn**: Enter your WatIAM username and password. The screen will display a 3-digit verification code to enter in your Duo Mobile app. You're signed in! Subsequent sign-ins can reuse trusted browser cookies.
-2. **Piazza**: Enter your Piazza email and password to activate Piazza post searching and course feeds.
-3. **Connect Assistant**: 1-click copy snippets for **Claude Desktop**, **Claude Code CLI**, and **ChatGPT / Claude.ai Web**.
+#### Deploying on Vercel
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp&project-name=uwaterloo-mcp&repository-name=uwaterloo-mcp&env=MCP_AUTH_TOKEN&envDescription=Your%20private%20MCP%20token.&envLink=https%3A%2F%2Fgithub.com%2Fsyed-zayd%2Fuwaterloo-mcp%23setup)
 
-### Connecting from Web Clients (Claude.ai / ChatGPT Web)
+> [!IMPORTANT]
+> When using Vercel, connect a **Blob** store (**Storage → Create → Blob → Private**) so your session persists across serverless instances.
 
-Web clients require a public HTTPS URL. If self-hosting, expose your port securely via Cloudflare Tunnel or ngrok:
+---
 
-```bash
-cloudflared tunnel --url http://localhost:8787
-```
+## Available Tools
 
-Then use the provided HTTPS URL with your Bearer token in Claude.ai or ChatGPT.
+### Learn
+- **Courses & Schedule**: `list_courses`, `get_upcoming`, `get_announcements`, `get_classlist`, `list_groups`
+- **Grades & Rubrics**: `get_grades`, `get_rubric`, `get_rubric_definition`
+- **Assignments & Submissions**: `list_assignments`, `get_submissions`, `get_submission_file`, `get_submission_file_url`
+- **Content & Files**: `get_course_content`, `get_file`, `get_file_url`, `list_page_links`, `resolve_link`
+- **Discussions & Quizzes**: `list_discussions`, `list_discussion_posts`, `get_discussion_thread`, `get_quiz_attempts`
 
-## Tools
+### Piazza
+- `piazza_list_courses` — List enrolled Piazza classes
+- `piazza_list_folders` — List discussion folders & categories
+- `piazza_search_posts` — Search class posts and instructor answers
+- `piazza_get_posts` — Read full thread by post number
 
-**Learn** — `server_info`, `list_courses`, `get_upcoming`, `get_grades`, `get_rubric`, `list_assignments`, `get_submissions`, `get_submission_file`, `get_submission_file_url`, `get_course_content`, `list_page_links`, `get_rubric_definition`, `resolve_link`, `get_file`, `get_file_url`, `get_quiz_attempts`, `get_classlist`, `list_groups`, `get_group`, `list_discussions`, `list_discussion_posts`, `get_discussion_thread`, `get_announcements`
+---
 
-**Piazza** — `piazza_list_courses`, `piazza_list_folders`, `piazza_search_posts`, `piazza_get_posts`
+## License
 
-Start with `list_courses` or `piazza_list_courses` — everything else takes a course.
-
-`get_rubric_definition` returns the blank rubric for an assignment — every criterion, what it is worth, and the descriptor for each level — so you can see what is being marked before you write. `get_rubric` is the other one: a rubric already filled in on work that has been graded.
-
-`get_course_content` lists topics, which is not everything a course holds: templates, policy PDFs and handouts usually sit in the content directory and are reached only by a link inside some page. `list_page_links` reads one page and lists those files with the paths `get_file` takes, along with the quicklinks the page carries.
-
-Course pages link things by quicklink (`quickLink.d2l?...&rcode=...`) rather than by id. `resolve_link` follows one and says what it points at — a content topic, a rubric, an assignment folder, a discussion, or a file path — so the id can go straight into the tool that needs it. Quiz quicklinks are reported, never followed.
-
-`get_file` and `get_file_url` name a file in either of two ways. Most files are content topics, so `topic_id` from `get_course_content` is the usual one. Some are not: an assignment template, a policy PDF or a handout linked straight from a course page has no topic of its own, and for those pass `path` instead — the link as it appears, e.g. `/content/enforced/123456-CS_247/media/template.docx`, or the full `https://learn.uwaterloo.ca/...` URL. A path must sit inside the named course's own content directory; anything else on Brightspace is refused.
-
-MIT licensed.
+MIT
