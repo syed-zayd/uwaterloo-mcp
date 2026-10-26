@@ -74,8 +74,9 @@ interface Backend {
   write(data: Buffer): Promise<void>;
 }
 
-function blobBackend(token: string): Backend {
+function blobBackend(token?: string): Backend {
   let detectedAccess: "private" | "public" = "private";
+  const tokenOpt = token ? { token } : {};
   return {
     kind: "blob",
     async read() {
@@ -87,7 +88,7 @@ function blobBackend(token: string): Backend {
         detectedAccess === "private" ? "public" : "private",
       ] as const) {
         try {
-          const result = await get(BLOB_PATHNAME, { access, useCache: false, token });
+          const result = await get(BLOB_PATHNAME, { access, useCache: false, ...tokenOpt });
           if (!result) return null;
           if (result.stream) {
             detectedAccess = access;
@@ -101,13 +102,13 @@ function blobBackend(token: string): Backend {
 
       // Fallback: list() works regardless of whether the store is public or private
       try {
-        const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 5, token });
+        const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 5, ...tokenOpt });
         const match = blobs.find((b) => b.pathname === BLOB_PATHNAME) ?? blobs[0];
         if (!match) return null;
         const targetUrl = match.downloadUrl || match.url;
-        const res = await fetch(targetUrl, {
-          headers: { Authorization: `Bearer ${token}`, "Cache-Control": "no-cache" },
-        });
+        const headers: Record<string, string> = { "Cache-Control": "no-cache" };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch(targetUrl, { headers });
         if (res.status === 404) return null;
         if (res.ok) return Buffer.from(await res.arrayBuffer());
       } catch (err) {
@@ -125,7 +126,7 @@ function blobBackend(token: string): Backend {
           addRandomSuffix: false,
           allowOverwrite: true,
           contentType: "application/octet-stream",
-          token,
+          ...tokenOpt,
         });
       } catch {
         const altAccess = detectedAccess === "private" ? "public" : "private";
@@ -134,7 +135,7 @@ function blobBackend(token: string): Backend {
           addRandomSuffix: false,
           allowOverwrite: true,
           contentType: "application/octet-stream",
-          token,
+          ...tokenOpt,
         });
         detectedAccess = altAccess;
       }
@@ -191,7 +192,7 @@ function findBlobToken(env: Record<string, string | undefined>): string | undefi
 
 function chooseBackend(env: Record<string, string | undefined>): Backend {
   const blobToken = findBlobToken(env);
-  if (blobToken) return blobBackend(blobToken);
+  if (blobToken || env.BLOB_STORE_ID?.trim()) return blobBackend(blobToken);
   // Serverless filesystems are read-only, or private to one short-lived instance — a file
   // there would look like persistence while being exactly as forgetful as memory.
   if (env.VERCEL) return memoryBackend();
