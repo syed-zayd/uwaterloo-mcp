@@ -195,7 +195,7 @@ export function setupPage(state: PageState): string {
           <input type="hidden" name="token" value="${token}">
           <input type="hidden" name="action" value="waterloo">
           <label for="username">WatIAM Username</label>
-          <input id="username" name="username" placeholder="jw25smit@uwaterloo.ca" autocomplete="username" required>
+          <input id="username" name="username" type="text" placeholder="jw25smit@uwaterloo.ca" autocomplete="username" required>
           <label for="password">Password</label>
           <input id="password" name="password" type="password" autocomplete="current-password" required>
           <label class="check">
@@ -347,7 +347,7 @@ function layout(content: string): string {
   .banner.error { background: var(--err-bg); color: var(--err); border: 1px solid var(--err); }
   label { display: block; font-size: .85rem; font-weight: 600; margin: .85rem 0 .3rem; }
   label:first-child { margin-top: 0; }
-  input[type="text"], input[type="password"], input[type="email"], textarea {
+  input[type="text"], input[type="password"], input[type="email"], input:not([type]), textarea {
     width: 100%; padding: .55rem .75rem; font-size: .92rem; border-radius: .4rem;
     border: 1px solid var(--border); background: transparent; color: inherit; font-family: inherit;
   }
