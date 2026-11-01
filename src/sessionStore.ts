@@ -31,10 +31,11 @@ const RECORD_VERSION = 1;
 
 /**
  * How long an instance trusts what it last read before looking again. Short enough that a
- * sign-in on one instance reaches the others within a request or two; long enough that a burst
- * of tool calls costs one read rather than one each.
+ * sign-in on one instance reaches the others within a minute (/setup forces a fresh read
+ * anyway); long enough that a session of tool calls costs a handful of reads rather than one
+ * per request.
  */
-const REFRESH_INTERVAL_MS = 5_000;
+const REFRESH_INTERVAL_MS = 60_000;
 
 /** A cookie from the sign-in browser, in the shape puppeteer reads and writes. */
 export interface StoredBrowserCookie {
@@ -74,14 +75,59 @@ interface Backend {
   write(data: Buffer): Promise<void>;
 }
 
+/**
+ * Vercel Blob bills list(), put() and copy() as "advanced" operations, and the free tier allows
+ * 2,000 a month before the store is suspended. Reads therefore go straight to the known pathname
+ * with get(), a simple operation, and list() is only the last resort when that cannot work.
+ */
 function blobBackend(token?: string): Backend {
   let detectedAccess: "private" | "public" = "private";
+  // The last body read, and its ETag, so an unchanged record comes back as a bodiless 304.
+  let cached: { etag: string; data: Buffer } | null = null;
   const tokenOpt = token ? { token } : {};
   return {
     kind: "blob",
     async read() {
       const { get, list, issueSignedToken, presignUrl, BlobNotFoundError } =
         await import("@vercel/blob");
+
+      let failure: unknown = null;
+      let missing = 0;
+      for (const access of [
+        detectedAccess,
+        detectedAccess === "private" ? "public" : "private",
+      ] as const) {
+        try {
+          const result = await get(BLOB_PATHNAME, {
+            access,
+            useCache: false,
+            ...(cached && access === detectedAccess ? { ifNoneMatch: cached.etag } : {}),
+            ...tokenOpt,
+          });
+          if (!result) {
+            missing++;
+            continue;
+          }
+          detectedAccess = access;
+          if (result.statusCode === 304 && cached) return cached.data;
+          if (result.stream) {
+            const data = Buffer.from(await new Response(result.stream).arrayBuffer());
+            cached = result.blob.etag ? { etag: result.blob.etag, data } : null;
+            return data;
+          }
+        } catch (err) {
+          if (err instanceof BlobNotFoundError) {
+            missing++;
+            continue;
+          }
+          failure ??= err;
+        }
+      }
+      // Not found under either access mode: there is no record yet. No list() needed to know.
+      if (missing === 2) return null;
+      console.warn("[session-store] direct blob read failed; falling back to list()", {
+        error: failure instanceof Error ? failure.message : String(failure),
+      });
 
       const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 5, ...tokenOpt });
       const match = blobs.find((b) => b.pathname === BLOB_PATHNAME) ?? blobs[0];
@@ -91,16 +137,6 @@ function blobBackend(token?: string): Backend {
         ? "private"
         : "public";
       detectedAccess = access;
-
-      try {
-        const result = await get(match.url, { access, useCache: false, ...tokenOpt });
-        if (!result) return null;
-        if (result.stream) {
-          return Buffer.from(await new Response(result.stream).arrayBuffer());
-        }
-      } catch (err) {
-        if (err instanceof BlobNotFoundError) return null;
-      }
 
       if (access === "public") {
         const res = await fetch(match.downloadUrl || match.url, {
@@ -132,6 +168,7 @@ function blobBackend(token?: string): Backend {
     },
     async write(data) {
       const { put } = await import("@vercel/blob");
+      cached = null;
       try {
         await put(BLOB_PATHNAME, data, {
           access: detectedAccess,

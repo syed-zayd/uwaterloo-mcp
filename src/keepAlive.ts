@@ -19,6 +19,21 @@ import { signInUWaterloo } from "./waterlooLogin.js";
 
 export const KEEP_ALIVE_INTERVAL_MS = 45 * 60_000; // 45 minutes
 
+/**
+ * How often a routine ping's timestamp is written back to the store. Every write is a billed
+ * Blob put(), so pings are remembered in memory and only persisted this often — another
+ * instance that misses a recent ping just pings Learn once more, which costs nothing.
+ */
+const PERSIST_PING_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
+
+/** The last successful ping seen by this instance, whether or not it has been persisted. */
+let lastPingAtLocal = 0;
+
+/** When Learn was last pinged, as far as this instance knows. */
+export function latestPingAt(record: { lastPingAt?: number | undefined } | null): number {
+  return Math.max(lastPingAtLocal, record?.lastPingAt ?? 0);
+}
+
 export interface PingResult {
   ok: boolean;
   message: string;
@@ -39,7 +54,12 @@ export async function pingLearnSession(config: Config): Promise<PingResult> {
 
   if (status.alive) {
     const who = `${status.user.FirstName} ${status.user.LastName}`;
-    await store.update({ lastPingAt: Date.now() });
+    const now = Date.now();
+    lastPingAtLocal = now;
+    const persisted = (await store.current())?.lastPingAt ?? 0;
+    if (now - persisted >= PERSIST_PING_INTERVAL_MS) {
+      await store.update({ lastPingAt: now });
+    }
     return {
       ok: true,
       who,
@@ -67,6 +87,7 @@ export async function pingLearnSession(config: Config): Promise<PingResult> {
         const who = `${newStatus.user.FirstName} ${newStatus.user.LastName}`;
         config.d2l = { host: config.d2lHost, cookie: login.cookie, csrfToken: undefined };
         process.env.D2L_COOKIE = login.cookie;
+        lastPingAtLocal = Date.now();
         await store.update({
           cookie: login.cookie,
           browserCookies: login.browserCookies,
@@ -97,7 +118,7 @@ export async function ensureKeepAliveOnRequest(config: Config): Promise<void> {
   const record = await store.current();
   if (!record?.keepAlive || !config.d2l) return;
 
-  const elapsed = Date.now() - (record.lastPingAt ?? 0);
+  const elapsed = Date.now() - latestPingAt(record);
   if (elapsed >= KEEP_ALIVE_INTERVAL_MS) {
     await pingLearnSession(config).catch((err) => {
       console.warn("[keep-alive] On-request refresh error:", err);
@@ -116,7 +137,7 @@ export function startKeepAliveRunner(config: Config): () => void {
       const record = await store.current();
       if (!record?.keepAlive || !config.d2l) return;
 
-      const elapsed = Date.now() - (record.lastPingAt ?? 0);
+      const elapsed = Date.now() - latestPingAt(record);
       if (elapsed >= KEEP_ALIVE_INTERVAL_MS) {
         console.info("[keep-alive] Scheduled session ping starting...");
         const result = await pingLearnSession(config);

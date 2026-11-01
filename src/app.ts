@@ -51,7 +51,7 @@ import {
 } from "./sessionStore.js";
 import { signInUWaterloo, WaterlooLoginError, type WaterlooLoginEvent } from "./waterlooLogin.js";
 import { PiazzaClient } from "./piazza/client.js";
-import { ensureKeepAliveOnRequest, pingLearnSession } from "./keepAlive.js";
+import { ensureKeepAliveOnRequest, latestPingAt, pingLearnSession } from "./keepAlive.js";
 import {
   authorizationServerMetadata,
   beginAuthorize,
@@ -157,7 +157,7 @@ function registerSetupRoute(app: Express, config: Config): void {
       serverUrl: `${base}/mcp`,
       authToken: config.authToken ?? undefined,
       keepAliveEnabled: !!record?.keepAlive,
-      lastPingAt: record?.lastPingAt,
+      lastPingAt: latestPingAt(record) || undefined,
     };
   };
 
@@ -710,7 +710,6 @@ export function createApp(config: Config): Express {
 
   app.get("/healthz", async (_req, res) => {
     const store = sessionStore(config);
-    await store.current(true);
     await ensureKeepAliveOnRequest(config);
     const record = await store.current();
     const storageEnvKeys = Object.keys(process.env).filter((k) =>
@@ -727,7 +726,7 @@ export function createApp(config: Config): Express {
       hasWaterloo: !!record?.waterloo,
       hasPiazza: !!record?.piazza,
       keepAlive: !!record?.keepAlive,
-      lastPingAt: record?.lastPingAt ?? null,
+      lastPingAt: latestPingAt(record) || null,
       storeError: store.lastError,
     });
   });
