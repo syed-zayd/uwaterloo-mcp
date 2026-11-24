@@ -19,7 +19,7 @@
  * nothing else.
  */
 
-/** `/content/enforced/1285415-PD10_081_cel_1269/toc/…` — the prefix every course file shares. */
+/** `/content/enforced/123456-COURSE_001_cel_0000/toc/…` — the prefix every course file shares. */
 const ENFORCED_ROOT = "/content/enforced/";
 
 export class CourseFilePathError extends Error {

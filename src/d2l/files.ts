@@ -10,7 +10,8 @@
  * anything scanned; handing over the PDF lets a client that understands PDFs use all of it.
  */
 
-import { D2LClient } from "./client.js";
+import { D2LClient, D2LError } from "./client.js";
+import { readHistoryPage } from "./submissionHistoryPage.js";
 import { fileNameFromPath } from "./coursePaths.js";
 
 /** Beyond this the base64 payload would be too large to return in one response. */
@@ -199,11 +200,22 @@ export async function getSubmissionFile(
   submissionId: number,
   fileId: number,
 ): Promise<CourseFile> {
-  return getFile(
-    client,
-    submissionFilePath(courseId, folderId, submissionId, fileId),
-    `submission-${submissionId}-file-${fileId}`,
-  );
+  try {
+    return await getFile(
+      client,
+      submissionFilePath(courseId, folderId, submissionId, fileId),
+      `submission-${submissionId}-file-${fileId}`,
+    );
+  } catch (err) {
+    // Closed folders refuse the API; the View History page still links every submitted file.
+    if (!(err instanceof D2LError) || (err.status !== 401 && err.status !== 403)) throw err;
+    const { submissions } = await readHistoryPage(client, courseId, folderId);
+    const file = submissions
+      .find((submission) => submission.id === submissionId)
+      ?.files.find((candidate) => candidate.id === fileId);
+    if (!file) throw err;
+    return getFile(client, file.href.replace(/^https?:\/\/[^/]+/i, ""), file.name);
+  }
 }
 
 /** The same file as `streamCourseFile`, read into memory for returning in one response. */

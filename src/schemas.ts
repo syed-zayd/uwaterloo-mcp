@@ -657,3 +657,27 @@ export const getUpcomingOutput = z.object({
   withinDays: z.number(),
   coursesChecked: z.number(),
 });
+
+export const getPageOutput = z.object({
+  url: z.string().describe("The site path that was read."),
+  title: z.string().nullable(),
+  text: z.string().describe("Visible page text, from textOffset, up to max_chars characters."),
+  textLength: z.number().describe("Length of the page's full text."),
+  textOffset: z.number(),
+  textTruncated: z.boolean().describe("True when more text follows; call again with a larger offset."),
+  links: z.array(
+    z.object({
+      text: z.string(),
+      href: z.string().nullable(),
+      onclick: z
+        .string()
+        .nullable()
+        .describe("The link's JavaScript handler. Brightspace often keeps ids here."),
+    }),
+  ),
+  frames: z.array(z.string()).describe("iframe sources; read them with get_page too."),
+  forms: z.array(
+    z.object({ action: z.string().nullable(), method: z.string(), fields: z.array(z.string()) }),
+  ),
+  scriptUrls: z.array(z.string()).describe("Learn paths mentioned in the page's inline scripts."),
+});

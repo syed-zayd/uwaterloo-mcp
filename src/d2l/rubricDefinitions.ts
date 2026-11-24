@@ -103,13 +103,29 @@ export async function findRubricPreviews(
 export async function fetchRubricDefinition(
   client: D2LClient,
   pageUrl: string,
+  strict = false,
 ): Promise<RubricDefinition | null> {
-  const html = await client.fetchText(pageUrl).catch(() => "");
-  if (!html) return null;
+  const fail = (why: string): null => {
+    if (strict) throw new Error(`Rubric could not be read from ${pageUrl}: ${why}`);
+    return null;
+  };
+  let fetchError = "";
+  const html = await client.fetchText(pageUrl).catch((err) => {
+    fetchError = err instanceof Error ? err.message : String(err);
+    return "";
+  });
+  if (!html) return fail(fetchError || "the page was empty");
 
+  const flat = html.split("\\/").join("/");
   const rubricHref = /https:\/\/[a-z0-9-]+\.rubrics\.api\.brightspace\.com\/organizations\/\d+\/\d+/i
-    .exec(html.split("\\/").join("/"))?.[0];
-  if (!rubricHref) return null;
+    .exec(flat)?.[0];
+  if (!rubricHref) {
+    const hints = [...new Set(flat.match(/https?:\/\/[^"'\s<>]*rubric[^"'\s<>]*/gi) ?? [])].slice(0, 8);
+    return fail(
+      `no rubrics.api.brightspace.com link on the page. Title: ${/<title>([^<]*)/i.exec(html)?.[1]?.trim() ?? "none"}. ` +
+        `Rubric-related URLs: ${hints.join(" , ") || "none"}`,
+    );
+  }
 
   const bearer = await client.getBearerToken();
   const get = async (url: string): Promise<SirenEntity | null> => {
@@ -122,7 +138,7 @@ export async function fetchRubricDefinition(
   };
 
   const root = await get(rubricHref);
-  if (!root) return null;
+  if (!root) return fail(`the rubrics service did not return ${rubricHref}`);
 
   const groupsHref = linkHref(root, "criteria-groups");
   const groups = groupsHref ? await readGroups(get, groupsHref) : [];
@@ -224,5 +240,40 @@ export function activityRubricPage(courseId: number, folderId: number): string {
 
 /** The preview page for a rubric whose id is already known. */
 export function rubricPreviewPath(courseId: number, rubricId: number): string {
-  return `${PREVIEW_PATH}?ou=${courseId}&rubricId=${rubricId}`;
+  // Without originTool, preview.d2l answers 400; quicklinks land on it with originTool=quicklinks.
+  return `${PREVIEW_PATH}?ou=${courseId}&rubricId=${rubricId}&originTool=quicklinks`;
+}
+
+/** The course's Rubrics tool (Resources → Rubrics), which lists every rubric students can see. */
+export function courseRubricListPath(courseId: number): string {
+  return `/d2l/lp/rubrics/list.d2l?ou=${courseId}`;
+}
+
+/**
+ * Every rubric id on the course's Rubrics page.
+ *
+ * Some rubrics are linked from no content page and from no dropbox a student can open yet,
+ * but they are listed here and previewable from here.
+ */
+export async function listCourseRubricIds(client: D2LClient, courseId: number): Promise<number[]> {
+  const path = courseRubricListPath(courseId);
+  const html = await client.fetchText(path);
+  const flat = html.split("\\/").join("/").replace(/&amp;/g, "&");
+  const ids = new Set<number>();
+  for (const match of flat.matchAll(/rubricId["']?\s*[=:,]\s*["']?(\d+)/gi)) ids.add(Number(match[1]));
+  // learn.uwaterloo.ca: <a onclick="PreviewRubric(&#39;12345&#39;, &#39;Assignment 1: …&#39;);" href="javascript://">
+  for (const match of flat.matchAll(/PreviewRubric\(\s*(?:&#39;|&#x27;|['"])(\d+)(?:&#39;|&#x27;|['"])/g)) {
+    ids.add(Number(match[1]));
+  }
+  if (ids.size === 0) {
+    const title = /<title>([^<]*)/i.exec(html)?.[1]?.trim() ?? "none";
+    // Show the raw markup of links that run script, which is where Brightspace keeps row ids,
+    // so a new id format can be read off the real page.
+    const scripted = (flat.match(/<a\b[^>]*onclick=[^>]*>[\s\S]{0,160}?<\/a>/gi) ?? []).slice(0, 6);
+    throw new Error(
+      `The course Rubrics page (${path}) listed no rubric ids. Page title: ${title}.\n` +
+        `Links with onclick handlers: ${scripted.join("\n") || "none"}`,
+    );
+  }
+  return [...ids];
 }

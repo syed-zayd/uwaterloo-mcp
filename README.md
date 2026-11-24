@@ -17,8 +17,10 @@ Read-only: reads course materials, announcements, grades, assignments, quizzes, 
 
    When prompted, enter a secure `MCP_AUTH_TOKEN` (24+ characters). This is your server password.
 
-2. **Connect Private Blob Storage** *(required to keep your login session alive across serverless requests)*:
-   In your Vercel project dashboard, go to **Storage → Create Database → Blob**, select **Private**, and click **Connect to Project**.
+2. **Connect storage** *(required to keep your login session alive across serverless requests)*:
+   In your Vercel project dashboard, go to **Storage → Create Database → Upstash for Redis** (free plan), and click **Connect to Project**. Then redeploy.
+
+   Vercel Blob (**Storage → Blob → Private**) also works, but the Hobby plan only includes 2,000 Blob "advanced operations" a month, and a store that exceeds them is suspended for 30 days. Redis is used whenever both are connected.
 
 3. **Sign in at `/setup`**:
    Open `https://<your-project>.vercel.app/setup` in your browser. Enter your `MCP_AUTH_TOKEN`, log in to WatIAM with Duo, and optionally connect your Piazza account.
@@ -79,7 +81,7 @@ In ChatGPT (**Settings → Developer mode → Add MCP Server**) or Claude.ai:
 - **Courses & Upcoming**: `list_courses`, `get_upcoming`, `get_announcements`, `get_classlist`, `list_groups`
 - **Grades & Rubrics**: `get_grades`, `get_rubric`, `get_rubric_definition`
 - **Assignments & Submissions**: `list_assignments`, `get_submissions`, `get_submission_file`, `get_submission_file_url`
-- **Course Content & Files**: `get_course_content`, `get_file`, `get_file_url`, `list_page_links`, `resolve_link`
+- **Course Content & Files**: `get_course_content`, `get_file`, `get_file_url`, `list_page_links`, `resolve_link`, `get_page` (read any Learn page the student can open: text, links with their onclick handlers, frames, forms; read-only)
 - **Discussions & Quizzes**: `list_discussions`, `list_discussion_posts`, `get_discussion_thread`, `get_quiz_attempts`
 
 ### Piazza

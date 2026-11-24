@@ -155,7 +155,7 @@ export function setupPage(state: PageState): string {
     ${banner}
     ${
       state.store === "memory"
-        ? `<div class="banner error"><strong>Persistent storage is not connected.</strong> Your Vercel project does not have <code>BLOB_READ_WRITE_TOKEN</code> set yet, so sessions are stored in memory only and reset whenever Vercel sleeps. In your Vercel dashboard, go to <strong>Storage → Connect Database → Blob</strong>, then <strong>Redeploy</strong> the project.</div>`
+        ? `<div class="banner error"><strong>Persistent storage is not connected.</strong> Your Vercel project has no Redis or Blob store connected, so sessions are stored in memory only and reset whenever Vercel sleeps. In your Vercel dashboard, go to <strong>Storage → Create Database → Upstash for Redis</strong>, connect it to this project, then <strong>Redeploy</strong>.</div>`
         : state.storeError
           ? `<div class="banner error"><strong>Storage error (${escapeHtml(state.store)}):</strong> ${escapeHtml(state.storeError)}</div>`
           : ""
