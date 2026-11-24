@@ -8,7 +8,8 @@
  * exactly the earlier code or document an AI may have been asked to compare.
  */
 
-import type { D2LClient } from "./client.js";
+import { D2LError, type D2LClient } from "./client.js";
+import { describeUnparsedPage, readHistoryPage } from "./submissionHistoryPage.js";
 import { getCourseGroups } from "./classlist.js";
 import { extractRubrics, type RubricCriterion } from "./feedback.js";
 import { richText } from "./format.js";
@@ -174,12 +175,59 @@ export async function getSubmissionHistory(
     );
     raw = Array.isArray(response) ? response : [response];
   } else {
-    raw = await client.le<RawEntityDropbox[]>(
-      `/${courseId}/dropbox/folders/${folder.Id}/submissions/mysubmissions/`,
-    );
+    try {
+      raw = await client.le<RawEntityDropbox[]>(
+        `/${courseId}/dropbox/folders/${folder.Id}/submissions/mysubmissions/`,
+      );
+    } catch (err) {
+      // Past a folder's end date Brightspace refuses this route to students (403), though the
+      // student can still open Dropbox > View History. Read that page instead.
+      if (!(err instanceof D2LError) || err.status !== 403) throw err;
+      return historyFromPage(client, courseId, folder);
+    }
   }
 
   return makeHistory(folder, raw);
+}
+
+async function historyFromPage(
+  client: D2LClient,
+  courseId: number,
+  folder: DropboxFolder,
+): Promise<AssignmentSubmissionHistory> {
+  const { submissions, html } = await readHistoryPage(client, courseId, folder.Id);
+  // A folder with nothing submitted renders the folder picker but no submissions table at all.
+  // Only a page that has the table header yet yields no rows is a parse failure.
+  if (submissions.length === 0 && /Submission ID/i.test(html) && !/no submissions/i.test(html)) {
+    throw new Error(
+      `The API refused this folder and its View History page could not be read.\n${describeUnparsedPage(html)}`,
+    );
+  }
+  const history = makeHistory(folder, []);
+  history.status = submissions.length > 0 ? "submitted" : "unsubmitted";
+  history.submissions = submissions
+    .slice()
+    .sort((a, b) => Date.parse(a.submittedAt ?? "1970-01-01") - Date.parse(b.submittedAt ?? "1970-01-01"))
+    .map((submission, index) => ({
+      id: submission.id,
+      number: index + 1,
+      submittedAt: submission.submittedAt,
+      submittedBy: { id: "", name: "You" },
+      comment: "(read from Learn's View History page; this folder is closed to the API)",
+      files: submission.files.flatMap((file) =>
+        file.id === null
+          ? []
+          : [{ id: file.id, name: file.name, size: parseSize(file.sizeText), isRead: false, isFlagged: false, isDeleted: false }],
+      ),
+    }));
+  return history;
+}
+
+function parseSize(text: string | null): number {
+  const match = /([\d.,]+)\s*([KMG]?)B/i.exec(text ?? "");
+  if (!match) return 0;
+  const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[match[2]!.toUpperCase() as "" | "K" | "M" | "G"];
+  return Math.round(Number(match[1]!.replace(/,/g, "")) * scale);
 }
 
 function makeHistory(folder: DropboxFolder, entities: RawEntityDropbox[]): AssignmentSubmissionHistory {

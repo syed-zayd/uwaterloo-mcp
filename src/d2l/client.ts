@@ -22,8 +22,8 @@ import { CURRENT_PROTOCOL_VERSION } from "../config.js";
  * revisions add fields rather than remove them, so an old pin silently loses data instead of
  * failing. `versions()` below reads the live list.
  */
-const LP_VERSION = "1.62"; // Learning Platform: users, enrollments, org units
-const LE_VERSION = "1.96"; // Learning Environment: grades, content, assignments, news
+const LP_VERSION = "1.64"; // Learning Platform: users, enrollments, org units
+const LE_VERSION = "1.100"; // Learning Environment: grades, content, assignments, news
 
 export interface D2LConfig {
   /** Base URL of the Brightspace instance, e.g. https://learn.uwaterloo.ca */
@@ -84,6 +84,9 @@ export class D2LSignedOutError extends D2LError {
 }
 
 export class D2LAuthError extends D2LError {
+  /** Start of D2L's response body, kept so a refusal of a live session can be reported as-is. */
+  body = "";
+
   constructor(url: string, status: number, setupUrl?: string) {
     super(
       [
@@ -99,6 +102,34 @@ export class D2LAuthError extends D2LError {
     );
     this.name = "D2LAuthError";
   }
+}
+
+/**
+ * D2L refused one route while the session itself is demonstrably alive.
+ *
+ * Brightspace answers 401/403 both for a dead cookie and for a route that this user (or this
+ * cookie-based auth) may not use. Telling the user to sign in again in the second case sends
+ * them to fix a session that works, so this reports what D2L actually said instead.
+ */
+export class D2LRouteRefusedError extends D2LError {
+  constructor(url: string, status: number, user: string, body: string) {
+    super(
+      [
+        `D2L refused this request (HTTP ${status}), but the session is alive — signed in as ${user}.`,
+        "Signing in again will not help: D2L is refusing this particular route, not the session.",
+        `Route: ${url}`,
+        body ? `D2L said: ${body}` : "D2L sent no explanation.",
+      ].join("\n"),
+      status,
+      url,
+    );
+    this.name = "D2LRouteRefusedError";
+  }
+}
+
+async function bodySnippet(response: Response): Promise<string> {
+  const text = await response.text().catch(() => "");
+  return text.replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
 export class D2LClient {
@@ -198,13 +229,18 @@ export class D2LClient {
       signal: AbortSignal.timeout(20_000),
     });
 
-    if (response.status === 401) throw new D2LAuthError(url, response.status, this.config.setupUrl);
+    if (response.status === 401) {
+      const err = new D2LAuthError(url, response.status, this.config.setupUrl);
+      err.body = await bodySnippet(response);
+      throw err;
+    }
 
     // A 403 usually means the session is fine but the caller lacks a permission — Brightspace
     // answers instructor-only routes that way and names the permission in the body. Calling
     // that an expired cookie sends the user off to re-authenticate a session that works.
     if (response.status === 403) {
-      const named = /"detail"\s*:\s*"([^"]+)"/.exec(await response.text().catch(() => ""))?.[1];
+      const body = await bodySnippet(response);
+      const named = /"detail"\s*:\s*"([^"]+)"/.exec(body)?.[1];
       if (named) {
         throw new D2LError(
           `Not permitted: ${named} This route is usually restricted to instructors.`,
@@ -212,7 +248,9 @@ export class D2LClient {
           url,
         );
       }
-      throw new D2LAuthError(url, response.status, this.config.setupUrl);
+      const err = new D2LAuthError(url, response.status, this.config.setupUrl);
+      err.body = body;
+      throw err;
     }
 
     if (response.status >= 300 && response.status < 400) {
@@ -272,12 +310,41 @@ export class D2LClient {
               Authorization: `Bearer ${bearer}`,
             },
           });
-        } catch {
-          throw err; // report the original failure, which is the more informative one
+        } catch (bearerErr) {
+          throw await this.explainRefusal(err, bearerErr);
         }
       }
-      throw err;
+      throw await this.explainRefusal(err);
     }
+  }
+
+  /**
+   * Decides whether an auth failure really means the session is dead.
+   *
+   * Checked only after a route has failed with both the cookie and a bearer token, so a
+   * healthy server pays nothing. If whoami still answers, the session is fine and the route
+   * itself was refused — say that, with D2L's own words, rather than "sign in again".
+   */
+  private async explainRefusal(err: unknown, bearerErr?: unknown): Promise<unknown> {
+    if (!(err instanceof D2LAuthError)) return err;
+    let user: WhoAmIUser;
+    try {
+      user = await this.request<WhoAmIUser>(`/d2l/api/lp/${LP_VERSION}/users/whoami`);
+    } catch {
+      return err; // whoami fails too: the session really is dead
+    }
+    const name = `${user.FirstName ?? ""} ${user.LastName ?? ""}`.trim() || String(user.Identifier);
+    const bearerNote =
+      bearerErr instanceof D2LError
+        ? ` [bearer retry: HTTP ${bearerErr.status}${bearerErr instanceof D2LAuthError && bearerErr.body ? ` ${bearerErr.body}` : ""}]`
+        : "";
+    console.warn("[d2l] route refused with a live session", {
+      url: err.url,
+      status: err.status,
+      body: err.body,
+      bearer: bearerErr instanceof D2LError ? bearerErr.status : undefined,
+    });
+    return new D2LRouteRefusedError(err.url, err.status, name, `${err.body}${bearerNote}`.trim());
   }
 
   /**
@@ -287,7 +354,7 @@ export class D2LClient {
    * same auth and the same treatment of a login redirect, and hands back the raw response.
    */
   async fetchRaw(path: string): Promise<Response> {
-    const url = `${this.config.host}${path}`;
+    const url = path.startsWith("http") ? path : `${this.config.host}${path}`;
     const response = await fetch(url, {
       headers: {
         Cookie: this.config.cookie,

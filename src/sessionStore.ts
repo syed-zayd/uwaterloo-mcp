@@ -8,6 +8,9 @@
  *
  * So a session is written somewhere every instance can read:
  *
+ *   - Redis over Upstash's REST API, when one is connected (KV_REST_API_URL / UPSTASH_REDIS_REST_URL
+ *     and the matching token). Preferred: a read is one GET, and the free tier's request allowance
+ *     dwarfs Blob's 2,000 "advanced operations" a month, which list() and put() both spend.
  *   - Vercel Blob, when the project has a store connected (BLOB_READ_WRITE_TOKEN or BLOB_STORE_ID is set).
  *   - A file on disk, on a host with a real filesystem (a laptop, a VPS, Render, Railway…).
  *   - Nowhere, on a serverless host with neither — the page says so rather than pretending.
@@ -27,6 +30,7 @@ import path from "node:path";
 import type { Config, PiazzaCredentials, WaterlooCredentials } from "./config.js";
 
 const BLOB_PATHNAME = "uwaterloo-mcp/learn-session.bin";
+const REDIS_KEY = "uwaterloo-mcp:learn-session";
 const RECORD_VERSION = 1;
 
 /**
@@ -67,7 +71,7 @@ export interface SessionRecord {
   lastPingAt?: number | undefined;
 }
 
-export type StoreKind = "blob" | "file" | "memory";
+export type StoreKind = "redis" | "blob" | "file" | "memory";
 
 interface Backend {
   kind: StoreKind;
@@ -192,6 +196,55 @@ function blobBackend(token?: string): Backend {
   };
 }
 
+/** Upstash's REST API: a POST of the command as a JSON array, answered with { result } or { error }. */
+function redisBackend(url: string, token: string): Backend {
+  const endpoint = url.replace(/\/+$/, "");
+  async function command(args: string[]): Promise<unknown> {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(args),
+      // A hung store must not hold the request until the platform kills it.
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = (await res.json().catch(() => null)) as { result?: unknown; error?: string } | null;
+    if (!res.ok || !body || body.error) {
+      throw new Error(`Redis ${args[0]} failed: ${body?.error ?? `${res.status} ${res.statusText}`}`);
+    }
+    return body.result;
+  }
+  return {
+    kind: "redis",
+    async read() {
+      const value = await command(["GET", REDIS_KEY]);
+      return typeof value === "string" ? Buffer.from(value, "base64") : null;
+    },
+    async write(data) {
+      await command(["SET", REDIS_KEY, data.toString("base64")]);
+    },
+  };
+}
+
+/**
+ * The REST URL and token of a connected Redis. The Vercel Marketplace names them KV_REST_API_*
+ * or UPSTASH_REDIS_REST_*, optionally behind a custom prefix, so match on the suffix.
+ */
+function findRedis(env: Record<string, string | undefined>): { url: string; token: string } | null {
+  const pairs: Array<[string, string]> = [
+    ["KV_REST_API_URL", "KV_REST_API_TOKEN"],
+    ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"],
+  ];
+  for (const [urlSuffix, tokenSuffix] of pairs) {
+    for (const key of Object.keys(env)) {
+      if (!key.endsWith(urlSuffix)) continue;
+      const url = env[key]?.trim();
+      const token = env[key.slice(0, -urlSuffix.length) + tokenSuffix]?.trim();
+      if (url?.startsWith("https://") && token) return { url, token };
+    }
+  }
+  return null;
+}
+
 function fileBackend(file: string): Backend {
   return {
     kind: "file",
@@ -240,6 +293,8 @@ function findBlobToken(env: Record<string, string | undefined>): string | undefi
 }
 
 function chooseBackend(env: Record<string, string | undefined>): Backend {
+  const redis = findRedis(env);
+  if (redis) return redisBackend(redis.url, redis.token);
   const blobToken = findBlobToken(env);
   if (blobToken || env.BLOB_STORE_ID?.trim()) return blobBackend(blobToken);
   // Serverless filesystems are read-only, or private to one short-lived instance — a file
