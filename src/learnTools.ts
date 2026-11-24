@@ -52,12 +52,14 @@ import { resolveCourseFilePath } from "./d2l/coursePaths.js";
 import { getSubmissionHistory, resolveDropboxFolder } from "./d2l/submissions.js";
 import { resolveQuickLink } from "./d2l/quicklinks.js";
 import { listPageLinks, type PageLink } from "./d2l/pageLinks.js";
+import { readPage } from "./d2l/page.js";
 import { getAssignmentFeedback, type AssignmentFeedback } from "./d2l/feedback.js";
 import { getRubricsForGradeItem, type GradedRubric } from "./d2l/rubrics.js";
 import {
   activityRubricPage,
   fetchRubricDefinition,
   findRubricPreviews,
+  listCourseRubricIds,
   rubricPreviewPath,
   type RubricDefinition,
 } from "./d2l/rubricDefinitions.js";
@@ -80,6 +82,7 @@ import {
   getQuizAttemptsOutput,
   getRubricOutput,
   listPageLinksOutput,
+  getPageOutput,
   rubricDefinitionOutput,
   resolveLinkOutput,
   getSubmissionFileOutput,
@@ -120,6 +123,7 @@ const COURSE_TOOL_NAMES = [
   "get_course_content",
   "resolve_link",
   "list_page_links",
+  "get_page",
   "get_file",
   "get_file_url",
   "get_quiz_attempts",
@@ -210,6 +214,7 @@ export function registerLearnTools(
   registerContent(server, client, course);
   registerResolveLink(server, client, course);
   registerPageLinks(server, client, course);
+  registerGetPage(server, client);
   registerGetFile(server, client, course);
   registerGetFileUrl(server, client, course, config);
   registerQuizAttempts(server, client, course);
@@ -236,7 +241,8 @@ function registerRubricDefinition(
         "descriptor for each level — what the work has to do to earn full marks. Use it " +
         "before writing or submitting, to see what is actually being scored. This is the " +
         "rubric itself; get_rubric is for one already filled in on marked work. Name the " +
-        "assignment, or pass rubric_id if you already have one.",
+        "assignment, pass rubric_id, or pass only the course to get every rubric listed on the " +
+        "course's Rubrics page (Resources → Rubrics), including rubrics no assignment links to.",
       inputSchema: z.object({
         course: courseArg,
         assignment: z
@@ -255,18 +261,17 @@ function registerRubricDefinition(
       guardStructured<z.infer<typeof rubricDefinitionOutput>>(async () => {
         const target = await course(reference);
 
-        if (assignment === undefined && rubric_id === undefined) {
-          throw new Error(
-            "Name the assignment whose rubric you want, or pass rubric_id. Assignment names " +
-              "and ids come from list_assignments.",
-          );
-        }
-
         let activityName: string | null = null;
         let pages: string[];
+        let strict = rubric_id !== undefined;
 
         if (rubric_id !== undefined) {
           pages = [rubricPreviewPath(target.id, rubric_id)];
+        } else if (assignment === undefined) {
+          // No assignment named: everything on the course's Rubrics page.
+          const ids = await listCourseRubricIds(client, target.id);
+          pages = ids.map((id) => rubricPreviewPath(target.id, id));
+          strict = true;
         } else {
           const folder = await resolveDropboxFolder(client, target.id, assignment as string);
           activityName = folder.Name;
@@ -280,7 +285,11 @@ function registerRubricDefinition(
         }
 
         const found = await Promise.all(
-          pages.map((page) => fetchRubricDefinition(client, page).catch(() => null)),
+          pages.map((page) =>
+            strict
+              ? fetchRubricDefinition(client, page, true)
+              : fetchRubricDefinition(client, page).catch(() => null),
+          ),
         );
         const rubrics = found.filter((rubric): rubric is RubricDefinition => rubric !== null);
 
@@ -453,6 +462,72 @@ function registerPageLinks(server: McpServer, client: D2LClient, course: CourseR
             links,
           },
         };
+      }),
+  );
+}
+
+function registerGetPage(server: McpServer, client: D2LClient): void {
+  server.registerTool(
+    "get_page",
+    {
+      title: "Read any Learn page",
+      description:
+        "Opens any learn.uwaterloo.ca page the signed-in student can see, exactly as their " +
+        "browser would, and returns its visible text, every link with its href and onclick " +
+        "handler (Brightspace often keeps ids in onclick, e.g. PreviewRubric('12345', …)), " +
+        "iframes, forms, and Learn URLs mentioned in the page's scripts. Use it for anything " +
+        "the dedicated tools do not cover, and to discover the URLs and ids that other pages " +
+        "use. Read-only: a single GET; it never submits forms or clicks links. For files " +
+        "(PDF, DOCX, ZIP) use get_file instead. Long pages are paged with offset.",
+      inputSchema: z.object({
+        url: z
+          .string()
+          .describe(
+            "A site path starting with / (e.g. /d2l/lp/rubrics/list.d2l?ou=123456) or a full " +
+              "https://learn.uwaterloo.ca/... URL.",
+          ),
+        offset: z.number().int().min(0).optional().describe("Character offset into the page text."),
+        max_chars: z
+          .number()
+          .int()
+          .min(1000)
+          .max(60000)
+          .optional()
+          .describe("How much page text to return. Defaults to 20000."),
+      }),
+      outputSchema: getPageOutput,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ url, offset, max_chars }) =>
+      guardStructured<z.infer<typeof getPageOutput>>(async () => {
+        const page = await readPage(client, url, { offset, maxChars: max_chars });
+        const lines = [
+          `${page.title ?? "(untitled)"} — ${page.url}`,
+          "",
+          page.text,
+          page.textTruncated
+            ? `\n[text ${page.textOffset}–${page.textOffset + page.text.length} of ${page.textLength}; ` +
+              `call again with offset ${page.textOffset + page.text.length} for more]`
+            : "",
+          "",
+          `Links (${page.links.length}):`,
+          ...page.links.map(
+            (link) =>
+              `  ${link.text || "(no text)"}` +
+              (link.href ? ` — ${link.href}` : "") +
+              (link.onclick ? ` — onclick: ${link.onclick}` : ""),
+          ),
+        ];
+        if (page.frames.length) lines.push("", "Frames:", ...page.frames.map((frame) => `  ${frame}`));
+        if (page.forms.length) {
+          lines.push(
+            "",
+            "Forms:",
+            ...page.forms.map((form) => `  ${form.method.toUpperCase()} ${form.action ?? "(this page)"} [${form.fields.join(", ")}]`),
+          );
+        }
+        if (page.scriptUrls.length) lines.push("", "URLs in scripts:", ...page.scriptUrls.map((u) => `  ${u}`));
+        return { text: lines.join("\n"), data: page };
       }),
   );
 }
@@ -1275,7 +1350,10 @@ function registerSubmissions(
           lines.push(
             "",
             `Submission ${submission.number} — id ${submission.id}` +
-              (submission.submittedAt ? ` — ${formatDate(submission.submittedAt)}` : ""),
+              (submission.submittedAt
+                ? // API dates are ISO; View History dates are local time exactly as the page shows them.
+                  ` — ${/^\d{4}-\d{2}-\d{2}T/.test(submission.submittedAt) ? formatDate(submission.submittedAt) : `${submission.submittedAt} (Learn local time)`}`
+                : ""),
             `  submitted by: ${submission.submittedBy.name}`,
           );
           if (submission.comment) {
